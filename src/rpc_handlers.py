@@ -39,24 +39,3 @@ def get_coordinates(n):
     resp_body = {"latitude": n.latitude, "longitude": n.longitude}
 
     return utils.create_request(resp_header, resp_body)
-
-
-def set_routing_table_rows(n, body):
-    """
-    RPC accepting routing table rows from a peer
-    :param n: node
-    :param body: body of request
-    :return: string of response (STATUS_OK)
-    """
-    resp_header = {"status": STATUS_OK}
-
-    # set routing table rows
-    for row_idx in body["rows"]:
-        n.routing_table[int(row_idx)] = [
-            Link((row["ip"], row["port"]), row["node_id"])
-            for row in body["rows"][row_idx]
-        ]
-
-    n.rows_filled += len(body["rows"])
-
-    return utils.create_request(resp_header, {})

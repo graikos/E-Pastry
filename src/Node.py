@@ -13,7 +13,6 @@ from src.Link import Link
 from src import utils
 from src.utils import log
 from src.rpc_handlers import REQUEST_MAP, STATUS_CONFLICT
-from src.rpc_handlers import set_routing_table_rows
 
 hash_func = sha1
 Link.hash_func = hash_func
@@ -37,7 +36,6 @@ class Node:
 
         self.state_mutex = utils.RWLock()
 
-        self.rows_filled = 0
         self.routing_table = [
             [None] * 2 ** utils.params["ring"]["b"]
             for _ in range(
@@ -60,18 +58,15 @@ class Node:
         self.join_ring()
 
     def join_ring(self):
-        """ """
-
-        exit_listener = False
-
-        def handler():
-            while self.rows_filled < len(self.routing_table) and exit_listener:
-                log.debug("Waiting for routing table to be filled")
-                self.conn_pool.select_incoming(set_routing_table_rows)
-
-        listener_thread = threading.Thread(target=handler)
-        listener_thread.start()
-
+        """
+        Gets a seed node from the seed server and joins the ring
+        The join process consists of two phases:
+            1. Send a special join message to the seed node
+            The seed node A routes the message to the closest node Z
+            Each node on the route extends the routing table with the requires row(s)
+            Node A appends its neighborhood set, while Z appends its leaf set
+            The final response contains the resulting sets and the routing table
+        """
         while True:
             # get initial node from seed server
             data = self.conn_pool.get_seed(
@@ -123,15 +118,51 @@ class Node:
                         seed_dead = True
                         break
 
-                    # initialize neighborhood and leaf sets from response
+                    # initialize state from response
+                    # set neighborhood set as A's neighborhood set
                     self.neighborhood_set = [
                         Link((n["ip"], n["port"]), n["node_id"])
                         for n in response["body"]["neighborhood_set"]
                     ]
+
+                    # copy Z's leaf set into A's leaf set
                     self.leaf_set_smaller = [
                         Link((n["ip"], n["port"]), n["node_id"])
                         for n in response["body"]["leaf_set_smaller"]
                     ]
+
+                    self.leaf_set_greater = [
+                        Link((n["ip"], n["port"]), n["node_id"])
+                        for n in response["body"]["leaf_set_greater"]
+                    ]
+
+                    # keep relevant nodes of leaf set based on node_id
+                    if self.node_id > self.leaf_set_smaller[-1]:
+                        for i, link in enumerate(self.leaf_set_greater):
+                            if self.node_id < link.node_id:
+                                self.leaf_set_smaller.extend(self.leaf_set_greater[:i])
+                                self.leaf_set_smaller = self.leaf_set_smaller[
+                                    -utils.params["node"]["L"] // 2 :
+                                ]
+                                self.leaf_set_greater = self.leaf_set_greater[i:]
+                                break
+                    else:
+                        for i, link in reversed(list(enumerate(self.leaf_set_smaller))):
+                            if self.node_id > link.node_id:
+                                self.leaf_set_greater[0:0] = self.leaf_set_smaller[-i:]
+                                self.leaf_set_greater = self.leaf_set_greater[
+                                    : utils.params["node"]["L"] // 2
+                                ]
+                                self.leaf_set_smaller = self.leaf_set_smaller[:-i]
+                                break
+
+                    # copy resulting routing table into A's routing table
+                    for i, row in enumerate(response["body"]["routing_table"]):
+                        for j, node in enumerate(row):
+                            if node is not None:
+                                self.routing_table[i][j] = Link(
+                                    (node["ip"], node["port"]), node["node_id"]
+                                )
 
                 # if seed node is dead, reseed
                 if seed_dead:
@@ -141,17 +172,14 @@ class Node:
             # if this is the first node
             else:
                 log.info("No other nodes in the network")
-                exit_listener = True
-                # poke listener thread to exit
-                self.conn_pool.poke_peer(self.conn_pool.SERVER_ADDR)
 
             break
-
-        listener_thread.join()
 
         self_link = Link(self.conn_pool.SERVER_ADDR, self.node_id)
         for i, digit in enumerate(self.node_id_digits):
             self.routing_table[i][digit] = self_link
+
+        # TODO: second join phase
 
     def ask_peer(
         self,
