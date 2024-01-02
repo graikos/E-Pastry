@@ -1,5 +1,6 @@
 from src import utils
 
+
 class Link:
     hash_func = None
 

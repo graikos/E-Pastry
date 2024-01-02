@@ -1,5 +1,3 @@
-
-
 class Storage:
     """
     Storage class
@@ -96,4 +94,3 @@ class Storage:
             d.append({"key": key, "value": self[key], "key_id": self.get_id(key)})
 
         return d
-    

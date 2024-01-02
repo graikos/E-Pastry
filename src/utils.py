@@ -89,6 +89,34 @@ def create_request(header_dict, body_dict):
     return request_msg
 
 
+def haversine(coord1, coord2):
+    """
+    Calculates the Haversine distance between two sets of coordinates
+    :param coord1: tuple containing first set of (latitude, longitude)
+    :param coord2: tuple containing second set of (latitude, longitude)
+    """
+    # Radius of Earth in kilometers
+    R = 6371.0
+
+    lat1, lon1 = coord1
+    lat2, lon2 = coord2
+
+    # Convert latitude and longitude from degrees to radians
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+    distance = R * c
+    return distance
+
+
 class RWLock:
     """
     Implements a readers-writer block with no priorities
