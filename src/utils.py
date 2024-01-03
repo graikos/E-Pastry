@@ -4,6 +4,7 @@ import math
 import logging
 import json
 from os import environ
+from types import GeneratorType
 
 # get configuration settings from params.json
 with open("config/params.json") as f:
@@ -47,13 +48,16 @@ def get_longest_common_prefix(digits1, digits2):
     """
     Returns the longest common prefix for two ids
     Both iterables must be of the same length
+    Iterables can be generators if all the digits don't need to be calculated
     :param digits1: an iterable containing the first set of digits
-    :param digits2: a generator containing the second set of digits
+    :param digits2: an iterable containing the second set of digits
     :return: the longest common prefix
     """
     count = 0
     for digit in digits1:
-        if digit != next(digits2):
+        if digit != (
+            next(digits2) if isinstance(digits2, GeneratorType) else digits2[count]
+        ):
             break
         count = count + 1
 
@@ -89,6 +93,31 @@ def create_request(header_dict, body_dict):
     return request_msg
 
 
+def insert_sorted(lst, item, maxlen, remove=0, comp=lambda x, y: x > y):
+    """
+    Inserts item into list in sorted order
+    :param lst: list to insert into
+    :param item: item to insert
+    :param maxlen: maximum length of list
+    :param remove: which item to remove if list is full after insertion (0 for first, -1 for last)
+    :param comp: comparison function for sorting
+    :return: None
+    """
+    if len(lst) == 0:
+        lst.append(item)
+        return
+
+    for i, elem in enumerate(lst):
+        if comp(elem, item):
+            lst.insert(i, item)
+            break
+    else:
+        lst.append(item)
+
+    if len(lst) > maxlen:
+        lst.pop(remove)
+
+
 def haversine(coord1, coord2):
     """
     Calculates the Haversine distance between two sets of coordinates
@@ -115,6 +144,79 @@ def haversine(coord1, coord2):
 
     distance = R * c
     return distance
+
+
+class LRUCache:
+    class Node:
+        def __init__(self, key, value):
+            self.key = key
+            self.value = value
+            self.prev = None
+            self.next = None
+
+        def __repr__(self):
+            return str(self.value)
+
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.dict = {}
+        self.head = LRUCache.Node(0, 0)
+        self.tail = LRUCache.Node(0, 0)
+        self.head.next = self.tail
+        self.tail.prev = self.head
+
+    def _add_node(self, node):
+        node.prev = self.head
+        node.next = self.head.next
+        self.head.next.prev = node
+        self.head.next = node
+
+    def _remove_node(self, node):
+        prev = node.prev
+        next = node.next
+        prev.next = next
+        next.prev = prev
+
+    def _move_to_head(self, node):
+        self._remove_node(node)
+        self._add_node(node)
+
+    def _pop_tail(self):
+        res = self.tail.prev
+        self._remove_node(res)
+        return res
+
+    def get(self, key):
+        node = self.dict.get(key, None)
+        if node is None:
+            return None
+        self._move_to_head(node)
+        return node.value
+
+    def __getitem__(self, key):
+        value = self.get(key)
+        if value is None:
+            raise KeyError
+        return value
+
+    def __setitem__(self, key, value):
+        node = self.dict.get(key)
+        if not node:
+            newNode = LRUCache.Node(key, value)
+            self.dict[key] = newNode
+            self._add_node(newNode)
+            if len(self.dict) > self.capacity:
+                tail = self._pop_tail()
+                del self.dict[tail.key]
+        else:
+            node.value = value
+            self._move_to_head(node)
+
+    def __contains__(self, key):
+        return key in self.dict
+
+    def __repr__(self):
+        return str(self.dict)
 
 
 class RWLock:

@@ -12,7 +12,7 @@ from src.ConnectionPool import ConnectionPool
 from src.Link import Link
 from src import utils
 from src.utils import log
-from src.rpc_handlers import REQUEST_MAP, STATUS_CONFLICT
+from src.rpc_handlers import REQUEST_MAP, STATUS_CONFLICT, STATUS_UPDATE_REQUIRED
 
 hash_func = sha1
 Link.hash_func = hash_func
@@ -29,12 +29,13 @@ class Node:
 
         self.event_queue = Queue()
 
+        # dictionary mapping node_ids to distances to nodes
+        self.id_to_distance = utils.LRUCache(utils.params["node"]["cache_size"])
+
         self.leaf_set_smaller = []
         self.leaf_set_greater = []
 
         self.neighborhood_set = []
-
-        self.state_mutex = utils.RWLock()
 
         self.routing_table = [
             [None] * 2 ** utils.params["ring"]["b"]
@@ -42,6 +43,10 @@ class Node:
                 ceil(utils.params["ring"]["bits"] / utils.params["ring"]["b"])
             )
         ]
+
+        self.update_timestamp = None
+
+        self.state_mutex = utils.RWLock()
 
         self.conn_pool = ConnectionPool(port)
 
@@ -94,6 +99,7 @@ class Node:
                             "port": self.conn_pool.SERVER_ADDR[1],
                             "start_row": 0,
                             "initial": True,
+                            "node_info": {},  # {"node_id": {"timestamp": ..., "is_first": ..., "is_last": ..., "start_row: ...", "end_row": ...}}
                         },
                         extra_header={"message_type": "join"},
                     )
@@ -120,49 +126,16 @@ class Node:
 
                     # initialize state from response
                     # set neighborhood set as A's neighborhood set
-                    self.neighborhood_set = [
-                        Link((n["ip"], n["port"]), n["node_id"])
-                        for n in response["body"]["neighborhood_set"]
-                    ]
+                    self._update_neighborhood_set(response["body"]["neighborhood_set"])
 
                     # copy Z's leaf set into A's leaf set
-                    self.leaf_set_smaller = [
-                        Link((n["ip"], n["port"]), n["node_id"])
-                        for n in response["body"]["leaf_set_smaller"]
-                    ]
-
-                    self.leaf_set_greater = [
-                        Link((n["ip"], n["port"]), n["node_id"])
-                        for n in response["body"]["leaf_set_greater"]
-                    ]
-
-                    # keep relevant nodes of leaf set based on node_id
-                    if self.node_id > self.leaf_set_smaller[-1]:
-                        for i, link in enumerate(self.leaf_set_greater):
-                            if self.node_id < link.node_id:
-                                self.leaf_set_smaller.extend(self.leaf_set_greater[:i])
-                                self.leaf_set_smaller = self.leaf_set_smaller[
-                                    -utils.params["node"]["L"] // 2 :
-                                ]
-                                self.leaf_set_greater = self.leaf_set_greater[i:]
-                                break
-                    else:
-                        for i, link in reversed(list(enumerate(self.leaf_set_smaller))):
-                            if self.node_id > link.node_id:
-                                self.leaf_set_greater[0:0] = self.leaf_set_smaller[-i:]
-                                self.leaf_set_greater = self.leaf_set_greater[
-                                    : utils.params["node"]["L"] // 2
-                                ]
-                                self.leaf_set_smaller = self.leaf_set_smaller[:-i]
-                                break
+                    self._update_leaf_set(
+                        response["body"]["leaf_set_smaller"],
+                        response["body"]["leaf_set_greater"],
+                    )
 
                     # copy resulting routing table into A's routing table
-                    for i, row in enumerate(response["body"]["routing_table"]):
-                        for j, node in enumerate(row):
-                            if node is not None:
-                                self.routing_table[i][j] = Link(
-                                    (node["ip"], node["port"]), node["node_id"]
-                                )
+                    self._update_routing_table(response["body"]["routing_table"])
 
                 # if seed node is dead, reseed
                 if seed_dead:
@@ -179,7 +152,112 @@ class Node:
         for i, digit in enumerate(self.node_id_digits):
             self.routing_table[i][digit] = self_link
 
-        # TODO: second join phase
+        self.update_timestamp = time.time()
+
+        request_addresses = set((self.conn_pool.SERVER_ADDR,))
+
+        for link in (
+            self.neighborhood_set
+            + self.leaf_set_smaller
+            + self.leaf_set_greater
+            + [item for row in self.routing_table for item in row]
+        ):
+            if link is not None and link.addr not in request_addresses:
+                response2 = self.ask_peer(
+                    link.addr,
+                    "just_joined",
+                    {
+                        "node_id": self.node_id,
+                        "ip": self.conn_pool.SERVER_ADDR[0],
+                        "port": self.conn_pool.SERVER_ADDR[1],
+                        **response["body"]["node_info"][link.node_id],
+                    },
+                    pre_request=False,
+                )
+                request_addresses.add(link.addr)
+                if not response2:
+                    # TODO: handle dead node
+                    continue
+                if response2["header"]["status"] == STATUS_UPDATE_REQUIRED:
+                    if response["body"]["node_info"][link.node_id]["is_first"]:
+                        self._update_neighborhood_set(
+                            response2["body"]["neighborhood_set"]
+                        )
+
+                    if response["body"]["node_info"][link.node_id]["is_last"]:
+                        self._update_leaf_set(
+                            response2["body"]["leaf_set_smaller"],
+                            response2["body"]["leaf_set_greater"],
+                        )
+
+                    self._update_routing_table(
+                        response2["body"]["routing_table"],
+                        response["body"]["node_info"][link.node_id]["start_row"],
+                    )
+
+    def _update_neighborhood_set(self, response_set):
+        """
+        Updates neighborhood set with set from response
+        :param response_set: set of nodes from response
+        :return: None
+        """
+        self.neighborhood_set = [
+            Link((n["ip"], n["port"]), n["node_id"]) for n in response_set
+        ]
+
+        for link in self.neighborhood_set:
+            self.id_to_distance[link.node_id] = self.get_distance_cached(link.addr)
+
+        # sort neighborhood set by distance
+        self.neighborhood_set.sort(key=lambda x: x.distance)
+
+    def _update_leaf_set(self, response_set_smaller, response_set_greater):
+        """
+        Updates leaf set with sets from response
+        :param response_set_smaller: set of nodes from response
+        :param response_set_greater: set of nodes from response
+        :return: None
+        """
+        self.leaf_set_smaller = [
+            Link((n["ip"], n["port"]), n["node_id"]) for n in response_set_smaller
+        ]
+
+        self.leaf_set_greater = [
+            Link((n["ip"], n["port"]), n["node_id"]) for n in response_set_greater
+        ]
+
+        # keep relevant nodes of leaf set based on node_id
+        if self.node_id > self.leaf_set_smaller[-1].node_id:
+            for i, link in enumerate(self.leaf_set_greater):
+                if self.node_id < link.node_id:
+                    self.leaf_set_smaller.extend(self.leaf_set_greater[:i])
+                    self.leaf_set_smaller = self.leaf_set_smaller[
+                        -utils.params["node"]["L"] // 2 :
+                    ]
+                    self.leaf_set_greater = self.leaf_set_greater[i:]
+                    break
+        else:
+            for i, link in reversed(list(enumerate(self.leaf_set_smaller))):
+                if self.node_id > link.node_id:
+                    self.leaf_set_greater[0:0] = self.leaf_set_smaller[-i:]
+                    self.leaf_set_greater = self.leaf_set_greater[
+                        : utils.params["node"]["L"] // 2
+                    ]
+                    self.leaf_set_smaller = self.leaf_set_smaller[:-i]
+                    break
+
+    def _update_routing_table(self, response_table, start_index=0):
+        """
+        Updates routing table with table from response
+        :param response_table: table of nodes from response
+        :return: None
+        """
+        for i, row in enumerate(response_table):
+            for j, node in enumerate(row):
+                if node is not None:
+                    self.routing_table[i + start_index][j] = Link(
+                        (node["ip"], node["port"]), node["node_id"]
+                    )
 
     def ask_peer(
         self,
@@ -224,6 +302,19 @@ class Node:
             return None
 
         return json.loads(data)
+
+    def get_distance_cached(self, node_id, node_addr):
+        """
+        Returns the distance from this node to the given node
+        If the distance is not cached, it is calculated and cached
+        :param node_id: ID of node
+        :param node_addr: (IP, port) of node
+        :return: distance
+        """
+        if node_id not in self.id_to_distance:
+            self.id_to_distance[node_id] = self.get_distance_to(node_addr)
+
+        return self.id_to_distance[node_id]
 
     def get_distance_to(self, node_addr):
         """

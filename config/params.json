@@ -13,7 +13,8 @@
     },
     "node": {
         "L": 16,
-        "M": 16
+        "M": 16,
+        "cache_size": 64
     },
     "net": {
         "timeout": 10,
