@@ -64,6 +64,38 @@ def get_longest_common_prefix(digits1, digits2):
     return count
 
 
+def get_ring_distance(id1, id2):
+    """
+    Returns the distance between two ids on the ring
+    :param id1: first id
+    :param id2: second id
+    :return: the distance
+    """
+    return min(
+        abs(id1 - id2),
+        abs(id1 - id2 + (-1 if id2 < id1 else 1) * 2 ** params["ring"]["bits"]),
+    )
+
+
+def get_numerically_closest(link1, link2, key):
+    """
+    Returns the id that is numerically closest to the key
+    If distance is the same, returns the smaller id
+    :param link1: link of first node
+    :param link2: link of second node
+    :param key: key to compare to
+    """
+    dist1 = get_ring_distance(link1.node_id, key)
+    dist2 = get_ring_distance(link2.node_id, key)
+
+    if dist1 < dist2:
+        return link1
+    elif dist2 < dist1:
+        return link2
+    else:
+        return min((link1, link2), key=lambda x: x.node_id)
+
+
 def get_ip():
     """
     Returns the local IP address of the machine

@@ -1,10 +1,12 @@
 import json
 import time
 import threading
+import heapq
 from random import randint
 from math import ceil
 from queue import Queue
 from hashlib import sha1
+from bisect import bisect_left
 
 # project files
 from src.Storage import Storage
@@ -44,7 +46,7 @@ class Node:
             )
         ]
 
-        self.update_timestamp = None
+        self.update_timestamp = 0
 
         self.state_mutex = utils.RWLock()
 
@@ -59,6 +61,7 @@ class Node:
             format=f"%(threadName)s:{self.node_id}-%(levelname)s: %(message)s",
             level=utils.environ.get("LOGLEVEL", utils.params["logging"]["level"]),
         )
+        self.self_link = Link(self.conn_pool.SERVER_ADDR, self.node_id)
         log.debug(f"Initialized with node ID: {self.node_id}")
         self.join_ring()
 
@@ -92,16 +95,12 @@ class Node:
                     log.info("Sending join request...")
                     response = self.ask_peer(
                         (data["body"]["ip"], data["body"]["port"]),
-                        "route",
+                        "join",
                         {
                             "node_id": self.node_id,
-                            "ip": self.conn_pool.SERVER_ADDR[0],
-                            "port": self.conn_pool.SERVER_ADDR[1],
                             "start_row": 0,
                             "initial": True,
-                            "node_info": {},  # {"node_id": {"timestamp": ..., "is_first": ..., "is_last": ..., "start_row: ...", "end_row": ...}}
                         },
-                        extra_header={"message_type": "join"},
                     )
 
                     if not response or response["header"]["status"] not in range(
@@ -148,11 +147,10 @@ class Node:
 
             break
 
-        self_link = Link(self.conn_pool.SERVER_ADDR, self.node_id)
         for i, digit in enumerate(self.node_id_digits):
-            self.routing_table[i][digit] = self_link
+            self.routing_table[i][digit] = self.self_link
 
-        self.update_timestamp = time.time()
+        self.update_timestamp = 1
 
         request_addresses = set((self.conn_pool.SERVER_ADDR,))
 
@@ -259,6 +257,107 @@ class Node:
                         (node["ip"], node["port"]), node["node_id"]
                     )
 
+    def locate_closest(self, key):
+        """
+        Locates node that is responsible for key and returns it
+        :param key: key to find
+        :return: address and id of node that is responsible for key
+        """
+        next_link = self.route(key)
+        if next_link is None:
+            return None
+        elif next_link is self.self_link:
+            return {
+                "ip": self.conn_pool.SERVER_ADDR[0],
+                "port": self.conn_pool.SERVER_ADDR[1],
+                "node_id": self.node_id,
+            }
+
+        response = self.ask_peer(next_link.addr, "locate_closest", {"key": key})
+        if not response or response["header"]["status"] not in range(200, 300):
+            return None
+
+        return response["body"]
+
+    def handle_join(self, id, start_row):
+        """
+        Handles join request
+        :param id: id of node that is joining
+        :param start_row: row to start routing table at
+        :return: tuple of (string of response, whether this is the last node)
+        """
+        next_link = self.route(id)
+        if next_link is None:
+            return None
+        elif next_link is self.self_link:
+            return (
+                {
+                    "leaf_set_smaller": [
+                        {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
+                        for n in self.leaf_set_smaller
+                    ],
+                    "leaf_set_greater": [
+                        {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
+                        for n in self.leaf_set_greater
+                    ],
+                },
+                True,  # value used to inform rpc handler that this is the last node
+            )
+
+        response = self.ask_peer(
+            next_link.addr,
+            "join",
+            {"id": id, "start_row": start_row, "initial": False},
+        )
+        if not response or response["header"]["status"] not in range(200, 300):
+            return None
+
+        return (response["body"], False)
+
+    def route(self, key):
+        """
+        Finds node that is responsible for key and returns it
+        :param key: key to find
+        :return: value of key
+        """
+        key_id = utils.get_id(key, hash_func)
+
+        leaf_set = self.leaf_set_smaller + [self.self_link] + self.leaf_set_greater
+        # if key is in leaf set, return closest node
+        if leaf_set[0].node_id <= key <= leaf_set[-1].node_id:
+            closest_index = bisect_left(leaf_set, key_id)
+            if leaf_set[closest_index].node_id == key_id:
+                node_link = leaf_set[closest_index]
+            else:
+                node_link = utils.get_numerically_closest(
+                    leaf_set[closest_index], leaf_set[closest_index - 1], key_id
+                )
+        # else, find closest node in routing table
+        else:
+            key_digits = list(utils.get_id_digits(key_id))
+            l = utils.get_longest_common_prefix(self.node_id_digits, key_digits)
+            node_link = self.routing_table[l][key_digits[l]]
+            if node_link is None:
+                # rare case where node is not in routing table
+                min_heap = []
+                for link in (
+                    self.neighborhood_set
+                    + leaf_set
+                    + [item for row in self.routing_table[l:] for item in row]
+                ):
+                    if link is not None:
+                        heapq.heappush(
+                            min_heap,
+                            (utils.get_ring_distance(link.node_id, key_id), link),
+                        )
+                # self is included in this list, so if self is returned, it means that no other node is closer
+                node_link = heapq.heappop(min_heap)[1]
+                # if no known node is closer, routing fails
+                if node_link is self.self_link:
+                    return None
+
+        return node_link
+
     def ask_peer(
         self,
         peer_addr,
@@ -282,15 +381,15 @@ class Node:
         w_mode = self.state_mutex.w_locked()
         if w_mode:
             self.state_mutex.w_leave()
-        request_msg = utils.create_request(
-            {"type": req_type, **extra_header}, body_dict
-        )
 
         # if request is on this node, call RPC handler directly
         if peer_addr == self.conn_pool.SERVER_ADDR:
             data = REQUEST_MAP[req_type](self, body_dict)
         # else, make request for RPC
         else:
+            request_msg = utils.create_request(
+                {"type": req_type, **extra_header}, body_dict
+            )
             data = self.conn_pool.send(
                 peer_addr, request_msg, pre_request, hold_connection
             )

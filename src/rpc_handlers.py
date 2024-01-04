@@ -11,11 +11,16 @@ REQUEST_MAP = {
     "poll": lambda n, body: poll(),
     "get_coordinates": lambda n, body: get_coordinates(n),
     "just_joined": lambda n, body: just_joined(n, body),
+    "join": lambda n, body: join(n, body),
+    "locate_closest": lambda n, body: locate_closest(n, body),
 }
 
 EXPECTED_REQUEST = {
     "poll": (),
     "get_coordinates": (),
+    "just_joined": ("timestamp", "ip", "port", "node_id", "is_first", "is_last"),
+    "join": ("node_id", "initial", "start_row"),
+    "locate_closest": ("key",),
 }
 
 
@@ -41,9 +46,79 @@ def get_coordinates(n):
     return utils.create_request(resp_header, resp_body)
 
 
+def locate_closest(n, body):
+    """
+    Finds the closest node to the key and returns its value
+    Can be called by find_key RPC, or join RPC for special join message
+    :param n: node
+    :param body: body of request
+    :return: string of response
+    """
+    closest = n.locate_closest(body["key"])
+
+    if closest is not None:
+        resp_header = {"status": STATUS_OK}
+        resp_body = closest
+    else:
+        resp_header = {"status": STATUS_NOT_FOUND}
+        resp_body = {}
+
+    return utils.create_request(resp_header, resp_body)
+
+
+def join(n, body):
+    """
+    Handles a join request from a new node
+    :param n: node
+    :param body: body of request
+    :return: string of response
+    """
+    resp_body = {}
+
+    if body["initial"]:
+        resp_body["neighborhood_set"] = [
+            {"ip": m.addr[0], "port": m.addr[1], "node_id": m.node_id}
+            for m in n.neighborhood_set
+        ]
+
+    common_prefix = utils.get_longest_common_prefix(
+        n.node_id_digits, utils.get_id_digits(body["node_id"])
+    )
+
+    resp_body["routing_table"] = [
+        {"ip": m.ip, "port": m.port, "node_id": m.node_id}
+        for i in range(resp_body["start_row"], common_prefix + 1)
+        for m in n.routing_table[i]
+    ]
+
+    resp_body["node_info"][n.node_id] = {
+        "timestamp": n.update_timestamp,
+        "is_first": body["initial"],
+        "start_row": resp_body["start_row"],
+        "end_row": common_prefix,
+    }
+
+    resp_body["start_row"] = common_prefix + 1
+
+    response, resp_body["node_info"]["is_last"] = n.handle_join(
+        body["node_id"], resp_body["start_row"]
+    )
+
+    if response is None:
+        resp_header = {"status": STATUS_NOT_FOUND}
+        return utils.create_request(resp_header, {})
+
+    resp_header = {"status": STATUS_OK}
+
+    resp_body["node_info"].update(response["node_info"])
+    resp_body["routing_table"].extend(response["routing_table"])
+
+    return utils.create_request(resp_header, resp_body)
+
+
 def just_joined(n, body):
     """
-    Adds a new node to this node's state if necessry
+    Adds a new node to this node's state if necessary
     :param n: node
     :param body: body of request
     :return: string of response
@@ -140,6 +215,9 @@ def just_joined(n, body):
             or n.get_distance_cached(current.node_id, current.addr) > distance
         ):
             n.routing_table[common_prefix][new_node_id_digits[common_prefix]] = new_link
+
+        # update timestamp
+        n.update_timestamp += 1
 
     n.event_queue.put(update)
 
