@@ -13,6 +13,8 @@ REQUEST_MAP = {
     "just_joined": lambda n, body: just_joined(n, body),
     "join": lambda n, body: join(n, body),
     "locate_closest": lambda n, body: locate_closest(n, body),
+    "find_key": lambda n, body: find_key(n, body),
+    "lookup": lambda n, body: lookup(n, body),
 }
 
 EXPECTED_REQUEST = {
@@ -21,7 +23,11 @@ EXPECTED_REQUEST = {
     "just_joined": ("timestamp", "ip", "port", "node_id", "is_first", "is_last"),
     "join": ("node_id", "initial", "start_row"),
     "locate_closest": ("key",),
+    "find_key": ("key",),
+    "lookup": ("key",),
 }
+
+## RPCs that only read from the node's state
 
 
 def poll():
@@ -86,34 +92,85 @@ def join(n, body):
     )
 
     resp_body["routing_table"] = [
-        {"ip": m.ip, "port": m.port, "node_id": m.node_id}
-        for i in range(resp_body["start_row"], common_prefix + 1)
-        for m in n.routing_table[i]
+        [
+            {"ip": m.addr[0], "port": m.addr[1], "node_id": m.node_id}
+            if m is not None
+            else None
+            for m in n.routing_table[i]
+        ]
+        for i in range(body["start_row"], common_prefix + 1)
     ]
 
+    resp_body["node_info"] = {}
     resp_body["node_info"][n.node_id] = {
         "timestamp": n.update_timestamp,
         "is_first": body["initial"],
-        "start_row": resp_body["start_row"],
+        "start_row": body["start_row"],
         "end_row": common_prefix,
     }
 
     resp_body["start_row"] = common_prefix + 1
 
-    response, resp_body["node_info"]["is_last"] = n.handle_join(
-        body["node_id"], resp_body["start_row"]
-    )
+    result = n.handle_join(body["node_id"], resp_body["start_row"])
 
-    if response is None:
+    if result is None:
         resp_header = {"status": STATUS_NOT_FOUND}
         return utils.create_request(resp_header, {})
 
+    response, resp_body["node_info"]["is_last"] = result
+
     resp_header = {"status": STATUS_OK}
 
-    resp_body["node_info"].update(response["node_info"])
-    resp_body["routing_table"].extend(response["routing_table"])
+    # if this node is last, response comes from self and only contains leaf set
+    # else, response comes from other node and contains routing table and node info as well
+    if not resp_body["node_info"]["is_last"]:
+        resp_body["node_info"].update(response["node_info"])
+        resp_body["routing_table"].extend(response["routing_table"])
+
+    resp_body["leaf_set_smaller"] = response["leaf_set_smaller"]
+    resp_body["leaf_set_greater"] = response["leaf_set_greater"]
 
     return utils.create_request(resp_header, resp_body)
+
+
+def lookup(n, body):
+    """
+    Looks up a key in the data of this node
+    :param n: node
+    :param body: body of request
+    :return: string of response
+    """
+    exists = body["key"] in n.storage
+    resp_header = {"status": STATUS_OK if exists else STATUS_NOT_FOUND}
+    resp_body = {}
+    if exists:
+        resp_body["value"] = n.storage[body["key"]]
+
+    return utils.create_request(resp_header, resp_body)
+
+
+def find_key(n, body):
+    """
+    Looks through chord for node with key and returns its value
+    :param n: the node which should call find_key
+    :param body: the request body
+    :return: string of response
+    """
+    value = n.find_key(body["key"])
+
+    resp_header = {}
+    resp_body = {}
+
+    if value:
+        resp_header["status"] = STATUS_OK
+        resp_body["value"] = value
+    else:
+        resp_header["status"] = STATUS_NOT_FOUND
+
+    return utils.create_request(resp_header, resp_body)
+
+
+## RPCs that write to the node's state
 
 
 def just_joined(n, body):
@@ -150,6 +207,8 @@ def just_joined(n, body):
             resp_body["routing_table"].append(
                 [
                     {"ip": l.addr[0], "port": l.addr[1], "node_id": l.addr}
+                    if l is not None
+                    else None
                     for l in n.routing_table[i]
                 ]
             )
@@ -190,7 +249,9 @@ def just_joined(n, body):
         n.id_to_distance[new_link.node_id] = distance
 
         # add to neighborhood set if appropriate
-        if distance < n.get_distance_cached(
+        if len(n.neighborhood_set) < utils.params["node"][
+            "M"
+        ] or distance < n.get_distance_cached(
             n.neighborhood_set[-1].node_id, n.neighborhood_set[-1].addr
         ):
             utils.insert_sorted(

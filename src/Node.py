@@ -2,7 +2,7 @@ import json
 import time
 import threading
 import heapq
-from random import randint
+from random import uniform
 from math import ceil
 from queue import Queue
 from hashlib import sha1
@@ -14,7 +14,12 @@ from src.ConnectionPool import ConnectionPool
 from src.Link import Link
 from src import utils
 from src.utils import log
-from src.rpc_handlers import REQUEST_MAP, STATUS_CONFLICT, STATUS_UPDATE_REQUIRED
+from src.rpc_handlers import (
+    REQUEST_MAP,
+    STATUS_CONFLICT,
+    STATUS_UPDATE_REQUIRED,
+    EXPECTED_REQUEST,
+)
 
 hash_func = sha1
 Link.hash_func = hash_func
@@ -24,8 +29,8 @@ class Node:
     def __init__(self, port=None):
         # random location for node
         # in a real implementation, this would be based on the node's IP
-        self.latitude = randint(-90, 90)
-        self.longitude = randint(-180, 180)
+        self.latitude = uniform(-90, 90)
+        self.longitude = uniform(-180, 180)
 
         self.storage = Storage()
 
@@ -64,6 +69,21 @@ class Node:
         self.self_link = Link(self.conn_pool.SERVER_ADDR, self.node_id)
         log.debug(f"Initialized with node ID: {self.node_id}")
         self.join_ring()
+
+        self.ask_peer(
+            (utils.params["seed_server"]["ip"], utils.params["seed_server"]["port"]),
+            "add_node",
+            {
+                "ip": self.conn_pool.SERVER_ADDR[0],
+                "port": self.conn_pool.SERVER_ADDR[1],
+                "node_id": self.node_id,
+                "latitude": self.latitude,
+                "longitude": self.longitude,
+            },
+            hold_connection=False,
+        )
+
+        self.listen()
 
     def join_ring(self):
         """
@@ -123,15 +143,15 @@ class Node:
                         seed_dead = True
                         break
 
-                    # initialize state from response
-                    # set neighborhood set as A's neighborhood set
-                    self._update_neighborhood_set(response["body"]["neighborhood_set"])
-
                     # copy Z's leaf set into A's leaf set
                     self._update_leaf_set(
                         response["body"]["leaf_set_smaller"],
                         response["body"]["leaf_set_greater"],
                     )
+
+                    # initialize state from response
+                    # set neighborhood set as A's neighborhood set
+                    self._update_neighborhood_set(response["body"]["neighborhood_set"])
 
                     # copy resulting routing table into A's routing table
                     self._update_routing_table(response["body"]["routing_table"])
@@ -177,15 +197,15 @@ class Node:
                     # TODO: handle dead node
                     continue
                 if response2["header"]["status"] == STATUS_UPDATE_REQUIRED:
-                    if response["body"]["node_info"][link.node_id]["is_first"]:
-                        self._update_neighborhood_set(
-                            response2["body"]["neighborhood_set"]
-                        )
-
                     if response["body"]["node_info"][link.node_id]["is_last"]:
                         self._update_leaf_set(
                             response2["body"]["leaf_set_smaller"],
                             response2["body"]["leaf_set_greater"],
+                        )
+
+                    if response["body"]["node_info"][link.node_id]["is_first"]:
+                        self._update_neighborhood_set(
+                            response2["body"]["neighborhood_set"]
                         )
 
                     self._update_routing_table(
@@ -205,6 +225,7 @@ class Node:
 
         for link in self.neighborhood_set:
             self.id_to_distance[link.node_id] = self.get_distance_cached(link.addr)
+            self._insert_into_leaf_set(link)
 
         # sort neighborhood set by distance
         self.neighborhood_set.sort(key=lambda x: x.distance)
@@ -225,7 +246,7 @@ class Node:
         ]
 
         # keep relevant nodes of leaf set based on node_id
-        if self.node_id > self.leaf_set_smaller[-1].node_id:
+        if self.leaf_set_smaller and self.node_id > self.leaf_set_smaller[-1].node_id:
             for i, link in enumerate(self.leaf_set_greater):
                 if self.node_id < link.node_id:
                     self.leaf_set_smaller.extend(self.leaf_set_greater[:i])
@@ -234,7 +255,7 @@ class Node:
                     ]
                     self.leaf_set_greater = self.leaf_set_greater[i:]
                     break
-        else:
+        elif self.leaf_set_greater:
             for i, link in reversed(list(enumerate(self.leaf_set_smaller))):
                 if self.node_id > link.node_id:
                     self.leaf_set_greater[0:0] = self.leaf_set_smaller[-i:]
@@ -243,6 +264,31 @@ class Node:
                     ]
                     self.leaf_set_smaller = self.leaf_set_smaller[:-i]
                     break
+
+    def _insert_into_leaf_set(self, node_link):
+        """
+        Inserts a link into the appropriate leaf set, if it doesn't already exist
+        :param node_link: link to insert
+        :return: None
+        """
+        if node_link.node_id < self.node_id and node_link.node_id not in (
+            l.node_id for l in self.leaf_set_smaller
+        ):
+            utils.insert_sorted(
+                self.leaf_set_smaller,
+                node_link,
+                utils.params["node"]["L"] // 2,
+                remove=0,
+                comp=lambda x, y: x.node_id > y.node_id,
+            )
+        elif node_link.node_id not in (l.node_id for l in self.leaf_set_greater):
+            utils.insert_sorted(
+                self.leaf_set_greater,
+                node_link,
+                utils.params["node"]["L"] // 2,
+                remove=-1,
+                comp=lambda x, y: x.node_id > y.node_id,
+            )
 
     def _update_routing_table(self, response_table, start_index=0):
         """
@@ -256,12 +302,31 @@ class Node:
                     self.routing_table[i + start_index][j] = Link(
                         (node["ip"], node["port"]), node["node_id"]
                     )
+                    self._insert_into_leaf_set(self.routing_table[i + start_index][j])
+
+    def find_key(self, key):
+        """
+        Finds node that contains key and returns the key's value
+        :param key: key to find
+        :return: value of key, or None if key is not found
+        """
+        new_node = self.locate_closest(key)
+        if new_node is None:
+            return None
+
+        response = self.ask_peer(
+            (new_node["ip"], new_node["port"]), "lookup", {"key": key}
+        )
+        if not response:
+            return None
+
+        return response["body"]["value"]
 
     def locate_closest(self, key):
         """
         Locates node that is responsible for key and returns it
         :param key: key to find
-        :return: address and id of node that is responsible for key
+        :return: address and id of node that is responsible for key, or None if key is not found
         """
         next_link = self.route(key)
         if next_link is None:
@@ -284,9 +349,9 @@ class Node:
         Handles join request
         :param id: id of node that is joining
         :param start_row: row to start routing table at
-        :return: tuple of (string of response, whether this is the last node)
+        :return: tuple of (string of response, whether this is the last node), or None if request fails
         """
-        next_link = self.route(id)
+        next_link = self.route(id, is_id=True)
         if next_link is None:
             return None
         elif next_link is self.self_link:
@@ -314,17 +379,18 @@ class Node:
 
         return (response["body"], False)
 
-    def route(self, key):
+    def route(self, key, is_id=False):
         """
         Finds node that is responsible for key and returns it
         :param key: key to find
-        :return: value of key
+        :param is_id: whether key is already an id
+        :return: value of key, or None if key is not found
         """
-        key_id = utils.get_id(key, hash_func)
+        key_id = utils.get_id(key, hash_func) if not is_id else key
 
         leaf_set = self.leaf_set_smaller + [self.self_link] + self.leaf_set_greater
         # if key is in leaf set, return closest node
-        if leaf_set[0].node_id <= key <= leaf_set[-1].node_id:
+        if leaf_set[0].node_id <= key_id <= leaf_set[-1].node_id:
             closest_index = bisect_left(leaf_set, key_id)
             if leaf_set[closest_index].node_id == key_id:
                 node_link = leaf_set[closest_index]
@@ -352,9 +418,11 @@ class Node:
                         )
                 # self is included in this list, so if self is returned, it means that no other node is closer
                 node_link = heapq.heappop(min_heap)[1]
+                """
                 # if no known node is closer, routing fails
                 if node_link is self.self_link:
                     return None
+                """
 
         return node_link
 
@@ -433,3 +501,99 @@ class Node:
             (self.latitude, self.longitude),
             (response["body"]["latitude"], response["body"]["longitude"]),
         )
+
+    def listen(self):
+        """
+        Main server loop
+        Starts a thread to accept connections using the connection pool
+        Starts a thread to handle periodic events
+        Loop is considered main thread/writer: reads shared queue and executes calls
+        :return: None
+        """
+
+        log.info(
+            f"Starting node on {self.conn_pool.SERVER_ADDR[0]}:{self.conn_pool.SERVER_ADDR[1]}"
+        )
+
+        # accept incoming connections
+        connection_listener = threading.Thread(target=self.handle_connections)
+        connection_listener.name = "Connection Listener"
+        connection_listener.daemon = True
+
+        connection_listener.start()
+
+        while True:
+            # wait until event_queue is not empty, then pop
+            data = self.event_queue.get()
+
+            self.state_mutex.w_enter()
+
+            log.debug(f"Popped {data} from event queue")
+
+            # TODO: change this when more events are added other than callables
+            data(self)
+
+            self.state_mutex.w_leave()
+
+    def handle_connections(self):
+        """
+        Handles incoming connections
+        :return: None
+        """
+        while True:
+            self.conn_pool.select_incoming(
+                lambda conn, addr: self.handle_response(conn, addr)
+            )
+
+    def handle_response(self, connection, data):
+        """
+        Handler function to be called when a message is received
+        Passed as lambda to ConnectionPool, including the node object
+        :param connection: the connection object (passed by ConnectionPool)
+        :param data: the data received (passed by ConnectionPool)
+        """
+        # if $ is first character, pre_request is contained
+        if data[0] == "$":
+            # split to ['', pre_request, main_request]
+            data = data.split("$")
+            # pre-request is the first part of the received data
+            pre_request = data[1]
+            pre_request = json.loads(pre_request)
+
+            data_size = pre_request["body"]["data_size"]
+
+            # anything received after is part of the main request
+            main_request = "".join(data[2:])
+            size_received = len(main_request.encode())
+
+            connection.setblocking(True)
+            # data might be large chunk, so read in batches
+            while size_received < data_size:
+                next_data = connection.recv(utils.params["net"]["data_size"])
+                size_received += len(next_data)
+                main_request += next_data.decode()
+
+            connection.setblocking(False)
+
+            data = main_request
+
+        data = json.loads(data)
+
+        # ensure request type exists
+        if data["header"]["type"] not in EXPECTED_REQUEST:
+            return
+
+        # ensure all expected arguments have been sent
+        for arg in EXPECTED_REQUEST[data["header"]["type"]]:
+            if arg not in data["body"]:
+                return
+
+        log.debug(f"Got RPC call of type: {data['header']['type']}")
+
+        # get mutex so main thread doesn't change object data during RPC
+        self.state_mutex.r_enter()
+        # select RPC handler according to RPC type
+        response = REQUEST_MAP[data["header"]["type"]](self, data["body"])
+        self.state_mutex.r_leave()
+
+        connection.sendall(response.encode())

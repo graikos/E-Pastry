@@ -91,6 +91,7 @@ class ConnectionPool:
 
         return data
 
+    # TODO: remove if unused
     def poke_peer(self, peer_addr):
         """
         Opens a connection to a peer and closes it immediately

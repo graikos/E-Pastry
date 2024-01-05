@@ -1,6 +1,6 @@
 {
     "seed_server": {
-        "ip": "192.168.1.15",
+        "ip": "192.168.2.7",
         "port": 8000,
         "attempt_limit": 4
     },
@@ -22,6 +22,6 @@
         "data_size": 8192
     },
     "logging": {
-        "level": "INFO"
+        "level": "DEBUG"
     }
 }
