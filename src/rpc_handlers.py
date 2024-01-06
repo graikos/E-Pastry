@@ -15,21 +15,65 @@ REQUEST_MAP = {
     "locate_closest": lambda n, body: locate_closest(n, body),
     "find_key": lambda n, body: find_key(n, body),
     "lookup": lambda n, body: lookup(n, body),
+    "debug_state": lambda n, body: debug_state(n),
 }
 
+"""
+Expected parameters for request body per request type
+Format:
+*) key (request type): (list of expected parameters)
+*) key (request type): (additional bool request header, (list of parameters if true), (list of parameters if false)
+"""
 EXPECTED_REQUEST = {
     "poll": (),
     "get_coordinates": (),
-    "just_joined": ("timestamp", "ip", "port", "node_id", "is_first", "is_last"),
+    "just_joined": (
+        (
+            "in_route",
+            (
+                "timestamp",
+                "ip",
+                "port",
+                "node_id",
+                "is_first",
+                "is_last",
+                "start_row",
+                "end_row",
+            ),
+            (
+                "ip",
+                "port",
+                "node_id",
+            ),
+        )
+    ),
     "join": ("node_id", "initial", "start_row"),
     "locate_closest": ("key",),
     "find_key": ("key",),
     "lookup": ("key",),
+    "debug_state": (),
 }
 
+
+## RPCs for debugging
+def debug_state(n):
+    """
+    Prints the state of the node
+    :param n: node
+    :param body: body of request
+    :return: string of response
+    """
+    print("--------------------------------")
+    print(f"Node ID: {n.node_id_digits}")
+    print(f"Neighborhood set: {n.neighborhood_set}")
+    print(f"Leaf set smaller: {n.leaf_set_smaller}")
+    print(f"Leaf set greater: {n.leaf_set_greater}")
+    print(f"Routing table: {n.routing_table}")
+    print("--------------------------------")
+    return utils.create_request({"status": STATUS_OK}, {})
+
+
 ## RPCs that only read from the node's state
-
-
 def poll():
     """
     Reads poll request from seed server, responds with OK
@@ -81,6 +125,7 @@ def join(n, body):
     """
     resp_body = {}
 
+    # if initial, append neighborhood set to response
     if body["initial"]:
         resp_body["neighborhood_set"] = [
             {"ip": m.addr[0], "port": m.addr[1], "node_id": m.node_id}
@@ -91,6 +136,7 @@ def join(n, body):
         n.node_id_digits, utils.get_id_digits(body["node_id"])
     )
 
+    # append appropriate rows of routing table to response
     resp_body["routing_table"] = [
         [
             {"ip": m.addr[0], "port": m.addr[1], "node_id": m.node_id}
@@ -101,6 +147,7 @@ def join(n, body):
         for i in range(body["start_row"], common_prefix + 1)
     ]
 
+    # append info of this node
     resp_body["node_info"] = {}
     resp_body["node_info"][n.node_id] = {
         "timestamp": n.update_timestamp,
@@ -109,24 +156,27 @@ def join(n, body):
         "end_row": common_prefix,
     }
 
+    # update start row for next node in route
     resp_body["start_row"] = common_prefix + 1
 
+    # forward request to next node
     result = n.handle_join(body["node_id"], resp_body["start_row"])
 
     if result is None:
         resp_header = {"status": STATUS_NOT_FOUND}
         return utils.create_request(resp_header, {})
 
-    response, resp_body["node_info"]["is_last"] = result
+    response, resp_body["node_info"][n.node_id]["is_last"] = result
 
     resp_header = {"status": STATUS_OK}
 
-    # if this node is last, response comes from self and only contains leaf set
-    # else, response comes from other node and contains routing table and node info as well
-    if not resp_body["node_info"]["is_last"]:
+    # if last, `response` only contains leaf set
+    # routing table and node info are in resp_body already
+    if not resp_body["node_info"][n.node_id]["is_last"]:
         resp_body["node_info"].update(response["node_info"])
         resp_body["routing_table"].extend(response["routing_table"])
 
+    # forward leaf set through route
     resp_body["leaf_set_smaller"] = response["leaf_set_smaller"]
     resp_body["leaf_set_greater"] = response["leaf_set_greater"]
 
@@ -171,8 +221,6 @@ def find_key(n, body):
 
 
 ## RPCs that write to the node's state
-
-
 def just_joined(n, body):
     """
     Adds a new node to this node's state if necessary
@@ -183,7 +231,7 @@ def just_joined(n, body):
     resp_header = {"status": STATUS_UPDATE_REQUIRED}
     resp_body = {}
     # check if state of node has been updated since join request
-    if n.update_timestamp > body["timestamp"]:
+    if body["in_route"] and n.update_timestamp > body["timestamp"]:
         # if node was first in join, return (possibly new) neighboorhood set
         if body["is_first"]:
             resp_body["neighborhood_set"] = [
@@ -196,9 +244,9 @@ def just_joined(n, body):
                 {"ip": l.addr[0], "port": l.addr[1], "node_id": l.addr}
                 for l in n.leaf_set_smaller
             ]
-            resp_body["leaf_set_larger"] = [
+            resp_body["leaf_set_greater"] = [
                 {"ip": l.addr[0], "port": l.addr[1], "node_id": l.addr}
-                for l in n.leaf_set_larger
+                for l in n.leaf_set_greater
             ]
 
         # return this node's (possibly new) routing table rows
@@ -217,7 +265,7 @@ def just_joined(n, body):
 
     new_link = Link((body["ip"], body["port"]), body["node_id"])
 
-    L2 = utils.params["node"]["L2"] // 2
+    L2 = utils.params["node"]["L"] // 2
 
     def update():
         # add to leaf set if appropriate
@@ -233,11 +281,11 @@ def just_joined(n, body):
                 comp=lambda x, y: x.node_id > y.node_id,
             )
         elif (
-            len(n.leaf_set_larger) < L2
-            or n.leaf_set_larger[-1].node_id > new_link.node_id
+            len(n.leaf_set_greater) < L2
+            or n.leaf_set_greater[-1].node_id > new_link.node_id
         ):
             utils.insert_sorted(
-                n.leaf_set_larger,
+                n.leaf_set_greater,
                 new_link,
                 L2,
                 remove=-1,
@@ -264,7 +312,7 @@ def just_joined(n, body):
             )
 
         # calculate common prefix with node id
-        new_node_id_digits = list(utils.get_digits(new_link.node_id))
+        new_node_id_digits = list(utils.get_id_digits(new_link.node_id))
         common_prefix = utils.get_longest_common_prefix(
             n.node_id_digits, new_node_id_digits
         )

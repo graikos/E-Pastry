@@ -18,4 +18,5 @@ class Link:
         return hash(self.addr)
 
     def __repr__(self):
-        return str(self.addr)
+        # return str(self.addr)
+        return str(self.node_id)

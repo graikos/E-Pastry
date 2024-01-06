@@ -61,7 +61,7 @@ class Node:
             self.conn_pool.SERVER_ADDR[0] + str(self.conn_pool.SERVER_ADDR[1]),
             hash_func,
         )
-        self.node_id_digits = utils.get_id_digits(self.node_id)
+        self.node_id_digits = list(utils.get_id_digits(self.node_id))
         utils.logging.basicConfig(
             format=f"%(threadName)s:{self.node_id}-%(levelname)s: %(message)s",
             level=utils.environ.get("LOGLEVEL", utils.params["logging"]["level"]),
@@ -95,6 +95,7 @@ class Node:
             Node A appends its neighborhood set, while Z appends its leaf set
             The final response contains the resulting sets and the routing table
         """
+        response = None
         while True:
             # get initial node from seed server
             data = self.conn_pool.get_seed(
@@ -123,9 +124,16 @@ class Node:
                         },
                     )
 
+                    log.debug(f"Response: {response}")
+
                     if not response or response["header"]["status"] not in range(
                         200, 300
                     ):
+                        log.debug(
+                            "Got response: " + "None"
+                            if not response
+                            else response["header"]["status"]
+                        )
                         # tell seed server that seed node has died
                         self.ask_peer(
                             (
@@ -156,6 +164,9 @@ class Node:
                     # copy resulting routing table into A's routing table
                     self._update_routing_table(response["body"]["routing_table"])
 
+                    log.info("Updated state")
+                    break
+
                 # if seed node is dead, reseed
                 if seed_dead:
                     log.info("Seed is dead, retrying...")
@@ -181,15 +192,27 @@ class Node:
             + [item for row in self.routing_table for item in row]
         ):
             if link is not None and link.addr not in request_addresses:
-                response2 = self.ask_peer(
-                    link.addr,
-                    "just_joined",
-                    {
+                if str(link.node_id) in response["body"]["node_info"]:
+                    extra_header = {"in_route": True}
+                    req_body = {
                         "node_id": self.node_id,
                         "ip": self.conn_pool.SERVER_ADDR[0],
                         "port": self.conn_pool.SERVER_ADDR[1],
-                        **response["body"]["node_info"][link.node_id],
-                    },
+                        **response["body"]["node_info"][str(link.node_id)],
+                    }
+                else:
+                    extra_header = {"in_route": False}
+                    req_body = {
+                        "node_id": self.node_id,
+                        "ip": self.conn_pool.SERVER_ADDR[0],
+                        "port": self.conn_pool.SERVER_ADDR[1],
+                    }
+
+                response2 = self.ask_peer(
+                    link.addr,
+                    "just_joined",
+                    req_body,
+                    extra_header=extra_header,
                     pre_request=False,
                 )
                 request_addresses.add(link.addr)
@@ -197,20 +220,20 @@ class Node:
                     # TODO: handle dead node
                     continue
                 if response2["header"]["status"] == STATUS_UPDATE_REQUIRED:
-                    if response["body"]["node_info"][link.node_id]["is_last"]:
+                    if response["body"]["node_info"][str(link.node_id)]["is_last"]:
                         self._update_leaf_set(
                             response2["body"]["leaf_set_smaller"],
                             response2["body"]["leaf_set_greater"],
                         )
 
-                    if response["body"]["node_info"][link.node_id]["is_first"]:
+                    if response["body"]["node_info"][str(link.node_id)]["is_first"]:
                         self._update_neighborhood_set(
                             response2["body"]["neighborhood_set"]
                         )
 
                     self._update_routing_table(
                         response2["body"]["routing_table"],
-                        response["body"]["node_info"][link.node_id]["start_row"],
+                        response["body"]["node_info"][str(link.node_id)]["start_row"],
                     )
 
     def _update_neighborhood_set(self, response_set):
@@ -224,11 +247,15 @@ class Node:
         ]
 
         for link in self.neighborhood_set:
-            self.id_to_distance[link.node_id] = self.get_distance_cached(link.addr)
+            self.id_to_distance[link.node_id] = self.get_distance_cached(
+                link.node_id, link.addr
+            )
             self._insert_into_leaf_set(link)
 
         # sort neighborhood set by distance
-        self.neighborhood_set.sort(key=lambda x: x.distance)
+        self.neighborhood_set.sort(
+            key=lambda x: self.get_distance_cached(x.node_id, x.addr)
+        )
 
     def _update_leaf_set(self, response_set_smaller, response_set_greater):
         """
@@ -246,7 +273,10 @@ class Node:
         ]
 
         # keep relevant nodes of leaf set based on node_id
-        if self.leaf_set_smaller and self.node_id > self.leaf_set_smaller[-1].node_id:
+        if (
+            not self.leaf_set_smaller
+            or self.node_id > self.leaf_set_smaller[-1].node_id
+        ):
             for i, link in enumerate(self.leaf_set_greater):
                 if self.node_id < link.node_id:
                     self.leaf_set_smaller.extend(self.leaf_set_greater[:i])
@@ -255,14 +285,14 @@ class Node:
                     ]
                     self.leaf_set_greater = self.leaf_set_greater[i:]
                     break
-        elif self.leaf_set_greater:
+        else:
             for i, link in reversed(list(enumerate(self.leaf_set_smaller))):
                 if self.node_id > link.node_id:
-                    self.leaf_set_greater[0:0] = self.leaf_set_smaller[-i:]
+                    self.leaf_set_greater[0:0] = self.leaf_set_smaller[i + 1 :]
                     self.leaf_set_greater = self.leaf_set_greater[
                         : utils.params["node"]["L"] // 2
                     ]
-                    self.leaf_set_smaller = self.leaf_set_smaller[:-i]
+                    self.leaf_set_smaller = self.leaf_set_smaller[: i + 1]
                     break
 
     def _insert_into_leaf_set(self, node_link):
@@ -271,16 +301,15 @@ class Node:
         :param node_link: link to insert
         :return: None
         """
-        if node_link.node_id < self.node_id and node_link.node_id not in (
-            l.node_id for l in self.leaf_set_smaller
-        ):
-            utils.insert_sorted(
-                self.leaf_set_smaller,
-                node_link,
-                utils.params["node"]["L"] // 2,
-                remove=0,
-                comp=lambda x, y: x.node_id > y.node_id,
-            )
+        if node_link.node_id < self.node_id:
+            if node_link.node_id not in (l.node_id for l in self.leaf_set_smaller):
+                utils.insert_sorted(
+                    self.leaf_set_smaller,
+                    node_link,
+                    utils.params["node"]["L"] // 2,
+                    remove=0,
+                    comp=lambda x, y: x.node_id > y.node_id,
+                )
         elif node_link.node_id not in (l.node_id for l in self.leaf_set_greater):
             utils.insert_sorted(
                 self.leaf_set_greater,
@@ -355,6 +384,7 @@ class Node:
         if next_link is None:
             return None
         elif next_link is self.self_link:
+            log.debug("Last node in route, sending leaf set")
             return (
                 {
                     "leaf_set_smaller": [
@@ -372,7 +402,7 @@ class Node:
         response = self.ask_peer(
             next_link.addr,
             "join",
-            {"id": id, "start_row": start_row, "initial": False},
+            {"node_id": id, "start_row": start_row, "initial": False},
         )
         if not response or response["header"]["status"] not in range(200, 300):
             return None
@@ -391,7 +421,7 @@ class Node:
         leaf_set = self.leaf_set_smaller + [self.self_link] + self.leaf_set_greater
         # if key is in leaf set, return closest node
         if leaf_set[0].node_id <= key_id <= leaf_set[-1].node_id:
-            closest_index = bisect_left(leaf_set, key_id)
+            closest_index = bisect_left(leaf_set, key_id, key=lambda x: x.node_id)
             if leaf_set[closest_index].node_id == key_id:
                 node_link = leaf_set[closest_index]
             else:
@@ -531,7 +561,7 @@ class Node:
             log.debug(f"Popped {data} from event queue")
 
             # TODO: change this when more events are added other than callables
-            data(self)
+            data()
 
             self.state_mutex.w_leave()
 
@@ -581,11 +611,24 @@ class Node:
 
         # ensure request type exists
         if data["header"]["type"] not in EXPECTED_REQUEST:
+            log.debug(f"Got RPC call of unknown type: {data['header']['type']}")
             return
 
         # ensure all expected arguments have been sent
-        for arg in EXPECTED_REQUEST[data["header"]["type"]]:
+        exp_req = EXPECTED_REQUEST[data["header"]["type"]]
+        if len(exp_req) == 3 and type(exp_req[0]) == str and type(exp_req[1]) == tuple:
+            extra_header = exp_req[0]
+            if extra_header not in data["header"]:
+                log.debug(
+                    f"RPC call of type {data['header']['type']} missing required header {extra_header}"
+                )
+                return
+            exp_req = exp_req[1 if data["header"][extra_header] else 2]
+            data["body"][extra_header] = data["header"][extra_header]
+
+        for arg in exp_req:
             if arg not in data["body"]:
+                log.debug(f"RPC call of type {data['header']['type']} missing {arg}")
                 return
 
         log.debug(f"Got RPC call of type: {data['header']['type']}")

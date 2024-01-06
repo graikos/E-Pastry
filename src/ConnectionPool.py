@@ -53,13 +53,14 @@ class ConnectionPool:
 
     def send(self, peer_addr, request_msg, pre_request, hold_connection=True):
         """
-                Sends a request to a peer with the given address
-                Returns the response from the peer
-                :param peer_adr: address of peer
-        e       :param request_msg: request message to send
-                :param pre_request: boolean indicating if pre-request with size should be sent
-                :return: peer response, or False if failed
+        Sends a request to a peer with the given address
+        Returns the response from the peer
+        :param peer_adr: address of peer
+        :param request_msg: request message to send
+        :param pre_request: boolean indicating if pre-request with size should be sent
+        :return: peer response, or False if failed
         """
+        log.debug(f"Sending request to {peer_addr}, msg: {request_msg}")
         client = self._get_connection(peer_addr, hold_connection)
         if not client:
             log.info(f"Failed to connect to {peer_addr}")
@@ -205,7 +206,7 @@ class ConnectionPool:
         if data:
             handler(sock, data.decode())
         else:
-            log.info(f"Closing connection to {sock.getpeername()}")
+            log.info(f"Closing connection")
             self.selector.unregister(sock)
             sock.close()
 

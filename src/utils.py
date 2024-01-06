@@ -178,6 +178,37 @@ def haversine(coord1, coord2):
     return distance
 
 
+def ask_peer(peer_addr, req_type, body_dict, custom_timeout=None):
+    """
+    Edited version of ask_peer for general use outside Node
+    Sends a request and returns the response
+    :param peer_addr: (IP, port) of peer
+    :param req_type: type of request for request header
+    :param body_dict: dictionary of body
+    :param custom_timeout: timeout for request; network parameter is used if None
+    :return: string response of peer
+    """
+
+    request_msg = create_request({"type": req_type}, body_dict)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client:
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        client.settimeout(
+            custom_timeout if custom_timeout is not None else params["net"]["timeout"]
+        )
+        try:
+            client.connect(peer_addr)
+            client.sendall(request_msg.encode())
+            data = client.recv(params["net"]["data_size"]).decode()
+        except (socket.error, socket.timeout):
+            return None
+
+    if not data:
+        return None
+
+    return json.loads(data)
+
+
 class LRUCache:
     class Node:
         def __init__(self, key, value):
