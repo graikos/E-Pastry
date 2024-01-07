@@ -1,11 +1,9 @@
 import json
 import time
 import threading
-import heapq
 from random import uniform
 from math import ceil
 from queue import Queue
-from hashlib import sha1
 from bisect import bisect_left
 
 # project files
@@ -13,7 +11,7 @@ from src.Storage import Storage
 from src.ConnectionPool import ConnectionPool
 from src.Link import Link
 from src import utils
-from src.utils import log
+from src.utils import log, hash_func
 from src.rpc_handlers import (
     REQUEST_MAP,
     STATUS_CONFLICT,
@@ -21,9 +19,7 @@ from src.rpc_handlers import (
     EXPECTED_REQUEST,
 )
 
-hash_func = sha1
 Link.hash_func = hash_func
-
 
 class Node:
     def __init__(self, port=None):
@@ -126,14 +122,7 @@ class Node:
 
                     log.debug(f"Response: {response}")
 
-                    if not response or response["header"]["status"] not in range(
-                        200, 300
-                    ):
-                        log.debug(
-                            "Got response: " + "None"
-                            if not response
-                            else response["header"]["status"]
-                        )
+                    if not response:
                         # tell seed server that seed node has died
                         self.ask_peer(
                             (
@@ -149,6 +138,10 @@ class Node:
                             hold_connection=False,
                         )
                         seed_dead = True
+                        break
+
+                    if response["header"]["status"] not in range(200, 300):
+                        log.debug("Failed to join, trying again...")
                         break
 
                     # copy Z's leaf set into A's leaf set
@@ -250,7 +243,7 @@ class Node:
             self.id_to_distance[link.node_id] = self.get_distance_cached(
                 link.node_id, link.addr
             )
-            self._insert_into_leaf_set(link)
+            self.insert_into_leaf_set(link)
 
         # sort neighborhood set by distance
         self.neighborhood_set.sort(
@@ -285,6 +278,12 @@ class Node:
                     ]
                     self.leaf_set_greater = self.leaf_set_greater[i:]
                     break
+            else:
+                self.leaf_set_smaller.extend(self.leaf_set_greater)
+                self.leaf_set_smaller = self.leaf_set_smaller[
+                    -utils.params["node"]["L"] // 2 :
+                ]
+                self.leaf_set_greater = []
         else:
             for i, link in reversed(list(enumerate(self.leaf_set_smaller))):
                 if self.node_id > link.node_id:
@@ -294,29 +293,36 @@ class Node:
                     ]
                     self.leaf_set_smaller = self.leaf_set_smaller[: i + 1]
                     break
+            else:
+                self.leaf_set_greater[0:0] = self.leaf_set_smaller
+                self.leaf_set_greater = self.leaf_set_greater[
+                    : utils.params["node"]["L"] // 2 
+                ]
+                self.leaf_set_smaller = []
 
-    def _insert_into_leaf_set(self, node_link):
+    def insert_into_leaf_set(self, node_link):
         """
         Inserts a link into the appropriate leaf set, if it doesn't already exist
         :param node_link: link to insert
         :return: None
         """
         if node_link.node_id < self.node_id:
-            if node_link.node_id not in (l.node_id for l in self.leaf_set_smaller):
-                utils.insert_sorted(
-                    self.leaf_set_smaller,
-                    node_link,
-                    utils.params["node"]["L"] // 2,
-                    remove=0,
-                    comp=lambda x, y: x.node_id > y.node_id,
-                )
-        elif node_link.node_id not in (l.node_id for l in self.leaf_set_greater):
+            utils.insert_sorted(
+                self.leaf_set_smaller,
+                node_link,
+                utils.params["node"]["L"] // 2,
+                remove=0,
+                comp=lambda x: x.node_id,
+                eq=lambda x: x.node_id
+            )
+        else:
             utils.insert_sorted(
                 self.leaf_set_greater,
                 node_link,
                 utils.params["node"]["L"] // 2,
                 remove=-1,
-                comp=lambda x, y: x.node_id > y.node_id,
+                comp=lambda x: x.node_id,
+                eq=lambda x: x.node_id
             )
 
     def _update_routing_table(self, response_table, start_index=0):
@@ -331,7 +337,10 @@ class Node:
                     self.routing_table[i + start_index][j] = Link(
                         (node["ip"], node["port"]), node["node_id"]
                     )
-                    self._insert_into_leaf_set(self.routing_table[i + start_index][j])
+                    # TODO Remove this
+                    if type(node["node_id"]) is list:
+                        log.debug(f"node id list is: {self.node_id}")
+                    self.insert_into_leaf_set(self.routing_table[i + start_index][j])
 
     def find_key(self, key):
         """
@@ -346,10 +355,55 @@ class Node:
         response = self.ask_peer(
             (new_node["ip"], new_node["port"]), "lookup", {"key": key}
         )
-        if not response:
+
+        if not response or response["header"]["status"] not in range(200, 300):
             return None
 
         return response["body"]["value"]
+
+    def find_and_store_key(self, key, value):
+        """
+        Finds node that key should be stored in and stores it there
+        If the key already exists, this will update its value with the given value
+        :param key: the key
+        :param value: the value of the key
+        :return: bool, whether the insertion was successful
+        """
+        new_node = self.locate_closest(key)
+
+        if new_node is None:
+            log.debug("Could not find node")
+            return False
+
+        response = self.ask_peer((new_node["ip"], new_node["port"]), "store_key", {"key": key, "value": value})
+
+        if not response or response["header"]["status"] not in range(200, 300):
+            log.debug("Could not store key")
+            return False
+
+        log.debug("Stored pair")
+        return True
+
+    def find_and_delete_key(self, key):
+        """
+        Finds node that key should be deleted from and deletes it there
+        :param key: the key
+        :return: bool, whether the deletion was successful
+        """
+        new_node = self.locate_closest(key)
+
+        if new_node is None:
+            log.debug("Could not find node")
+            return False
+        
+        response = self.ask_peer((new_node["ip"], new_node["port"]), "delete_key", {"key": key})
+
+        if not response or response["header"]["status"] not in range(200, 300):
+            log.debug("Could not delete key")
+            return False
+        
+        log.debug("Deleted pair")
+        return True
 
     def locate_closest(self, key):
         """
@@ -378,9 +432,14 @@ class Node:
         Handles join request
         :param id: id of node that is joining
         :param start_row: row to start routing table at
-        :return: tuple of (string of response, whether this is the last node), or None if request fails
+        :return: tuple of (
+            string of response, 
+            whether this is the last node, 
+            whether to append routing table rows
+        ), or None if request fails
         """
         next_link = self.route(id, is_id=True)
+        
         if next_link is None:
             return None
         elif next_link is self.self_link:
@@ -397,7 +456,11 @@ class Node:
                     ],
                 },
                 True,  # value used to inform rpc handler that this is the last node
+                True  # value used to inform rpc handler that routing table rows should be appended
             )
+        
+        key_digits = list(utils.get_id_digits(id))
+        pass_rows = utils.get_longest_common_prefix(self.node_id_digits, key_digits) < utils.get_longest_common_prefix(list(utils.get_id_digits(next_link.node_id)), key_digits)
 
         response = self.ask_peer(
             next_link.addr,
@@ -407,7 +470,7 @@ class Node:
         if not response or response["header"]["status"] not in range(200, 300):
             return None
 
-        return (response["body"], False)
+        return (response["body"], False, pass_rows)
 
     def route(self, key, is_id=False):
         """
@@ -425,9 +488,12 @@ class Node:
             if leaf_set[closest_index].node_id == key_id:
                 node_link = leaf_set[closest_index]
             else:
+                log.debug(f"Leaf set is {leaf_set}")
+                log.debug(f"Comparing {leaf_set[closest_index]} and {leaf_set[closest_index - 1]}")
                 node_link = utils.get_numerically_closest(
                     leaf_set[closest_index], leaf_set[closest_index - 1], key_id
                 )
+                log.debug(f"Closest node: {node_link}")
         # else, find closest node in routing table
         else:
             key_digits = list(utils.get_id_digits(key_id))
@@ -435,24 +501,18 @@ class Node:
             node_link = self.routing_table[l][key_digits[l]]
             if node_link is None:
                 # rare case where node is not in routing table
-                min_heap = []
+                node_link = self.self_link
+                distance = abs(self.node_id - key_id)
                 for link in (
                     self.neighborhood_set
                     + leaf_set
                     + [item for row in self.routing_table[l:] for item in row]
                 ):
                     if link is not None:
-                        heapq.heappush(
-                            min_heap,
-                            (utils.get_ring_distance(link.node_id, key_id), link),
-                        )
-                # self is included in this list, so if self is returned, it means that no other node is closer
-                node_link = heapq.heappop(min_heap)[1]
-                """
-                # if no known node is closer, routing fails
-                if node_link is self.self_link:
-                    return None
-                """
+                        link_distance = abs(link.node_id - key_id)
+                        if link_distance < distance:
+                            node_link = link
+                            distance = link_distance
 
         return node_link
 
@@ -509,7 +569,11 @@ class Node:
         :return: distance
         """
         if node_id not in self.id_to_distance:
-            self.id_to_distance[node_id] = self.get_distance_to(node_addr)
+            distance = self.get_distance_to(node_addr)
+            if distance is None:
+                # TODO: handle dead node
+                pass
+            self.id_to_distance[node_id] = distance
 
         return self.id_to_distance[node_id]
 
@@ -632,6 +696,10 @@ class Node:
                 return
 
         log.debug(f"Got RPC call of type: {data['header']['type']}")
+
+        # TODO REMOVE
+        if data["header"]["type"] == "join":
+            log.debug(f"My leaf set is {self.leaf_set_smaller + [self.self_link] + self.leaf_set_greater}")
 
         # get mutex so main thread doesn't change object data during RPC
         self.state_mutex.r_enter()

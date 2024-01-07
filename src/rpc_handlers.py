@@ -14,7 +14,11 @@ REQUEST_MAP = {
     "join": lambda n, body: join(n, body),
     "locate_closest": lambda n, body: locate_closest(n, body),
     "find_key": lambda n, body: find_key(n, body),
+    "find_and_store_key": lambda n, body: find_and_store_key(n, body),
+    "find_and_delete_key": lambda n, body: find_and_delete_key(n, body),
     "lookup": lambda n, body: lookup(n, body),
+    "store_key": lambda n, body: store_key(n, body),
+    "delete_key": lambda n, body: delete_key(n, body),
     "debug_state": lambda n, body: debug_state(n),
 }
 
@@ -50,7 +54,11 @@ EXPECTED_REQUEST = {
     "join": ("node_id", "initial", "start_row"),
     "locate_closest": ("key",),
     "find_key": ("key",),
+    "find_and_store_key": ("key", "value"),
+    "find_and_delete_key": ("key",),
     "lookup": ("key",),
+    "store_key": ("key", "value"),
+    "delete_key": ("key",),
     "debug_state": (),
 }
 
@@ -68,9 +76,11 @@ def debug_state(n):
     print(f"Neighborhood set: {n.neighborhood_set}")
     print(f"Leaf set smaller: {n.leaf_set_smaller}")
     print(f"Leaf set greater: {n.leaf_set_greater}")
-    print(f"Routing table: {n.routing_table}")
+    print(f"Routing table:")
+    for row in n.routing_table:
+        print(row)
     print("--------------------------------")
-    return utils.create_request({"status": STATUS_OK}, {})
+    return utils.create_request({"status": STATUS_OK})
 
 
 ## RPCs that only read from the node's state
@@ -81,7 +91,7 @@ def poll():
     """
     resp_header = {"status": STATUS_OK}
 
-    return utils.create_request(resp_header, {})
+    return utils.create_request(resp_header)
 
 
 def get_coordinates(n):
@@ -123,7 +133,7 @@ def join(n, body):
     :param body: body of request
     :return: string of response
     """
-    resp_body = {}
+    resp_body = {"routing_table": [], "node_info": {}}
 
     # if initial, append neighborhood set to response
     if body["initial"]:
@@ -136,19 +146,7 @@ def join(n, body):
         n.node_id_digits, utils.get_id_digits(body["node_id"])
     )
 
-    # append appropriate rows of routing table to response
-    resp_body["routing_table"] = [
-        [
-            {"ip": m.addr[0], "port": m.addr[1], "node_id": m.node_id}
-            if m is not None
-            else None
-            for m in n.routing_table[i]
-        ]
-        for i in range(body["start_row"], common_prefix + 1)
-    ]
-
     # append info of this node
-    resp_body["node_info"] = {}
     resp_body["node_info"][n.node_id] = {
         "timestamp": n.update_timestamp,
         "is_first": body["initial"],
@@ -166,7 +164,19 @@ def join(n, body):
         resp_header = {"status": STATUS_NOT_FOUND}
         return utils.create_request(resp_header, {})
 
-    response, resp_body["node_info"][n.node_id]["is_last"] = result
+    response, resp_body["node_info"][n.node_id]["is_last"], pass_rows = result
+
+    if pass_rows:
+        # append appropriate rows of routing table to response
+        resp_body["routing_table"] = [
+            [
+                {"ip": m.addr[0], "port": m.addr[1], "node_id": m.node_id}
+                if m is not None
+                else None
+                for m in n.routing_table[i]
+            ]
+            for i in range(body["start_row"], common_prefix + 1)
+        ]
 
     resp_header = {"status": STATUS_OK}
 
@@ -201,7 +211,7 @@ def lookup(n, body):
 
 def find_key(n, body):
     """
-    Looks through chord for node with key and returns its value
+    Looks for node with key and returns its value
     :param n: the node which should call find_key
     :param body: the request body
     :return: string of response
@@ -218,6 +228,26 @@ def find_key(n, body):
         resp_header["status"] = STATUS_NOT_FOUND
 
     return utils.create_request(resp_header, resp_body)
+
+
+def find_and_store_key(n, body):
+    """
+    Looks for node with key and stores the key-value pair
+    :param n: the node which should call find_key
+    :param body: the request body
+    :return: string of response
+    """
+    return utils.create_request({"status": STATUS_OK if n.find_and_store_key(body["key"], body["value"]) else STATUS_NOT_FOUND})
+
+
+def find_and_delete_key(n, body):
+    """
+    Looks for node with key and deletes the key-value pair
+    :param n: the node which should call find_key
+    :param body: the request body
+    :return: string of response
+    """
+    return utils.create_request({"status": STATUS_OK if n.find_and_delete_key(body["key"]) else STATUS_NOT_FOUND})
 
 
 ## RPCs that write to the node's state
@@ -269,31 +299,14 @@ def just_joined(n, body):
 
     def update():
         # add to leaf set if appropriate
-        if new_link.node_id < n.node_id and (
-            len(n.leaf_set_smaller) < L2
-            or n.leaf_set_smaller[-1].node_id < new_link.node_id
-        ):
-            utils.insert_sorted(
-                n.leaf_set_smaller,
-                new_link,
-                L2,
-                remove=0,
-                comp=lambda x, y: x.node_id > y.node_id,
-            )
-        elif (
-            len(n.leaf_set_greater) < L2
-            or n.leaf_set_greater[-1].node_id > new_link.node_id
-        ):
-            utils.insert_sorted(
-                n.leaf_set_greater,
-                new_link,
-                L2,
-                remove=-1,
-                comp=lambda x, y: x.node_id > y.node_id,
-            )
+        n.insert_into_leaf_set(new_link)
 
         # calculate distance to node
         distance = n.get_distance_to(new_link.addr)
+        if distance is None:
+            # TODO: handle dead node
+            return
+
         n.id_to_distance[new_link.node_id] = distance
 
         # add to neighborhood set if appropriate
@@ -307,8 +320,8 @@ def just_joined(n, body):
                 new_link,
                 utils.params["node"]["M"],
                 remove=-1,
-                comp=lambda x, y: n.id_to_distance[x.node_id]
-                > n.id_to_distance[y.node_id],
+                comp=lambda x: n.id_to_distance[x.node_id],
+                eq=lambda x: x.node_id,
             )
 
         # calculate common prefix with node id
@@ -331,3 +344,32 @@ def just_joined(n, body):
     n.event_queue.put(update)
 
     return utils.create_request(resp_header, resp_body)
+
+
+def store_key(n, body):
+    """
+    Stores a new (key, value) pair to the storage of this node
+    :param n: the node into which to insert the pair
+    :param body: the request body
+    :return: string of response
+    """
+    def store():
+        n.storage.add_key(body["key"], body["value"], utils.get_id(body["key"], utils.hash_func))
+
+    n.event_queue.put(store)
+
+    return utils.create_request({"status": STATUS_OK})
+
+
+def delete_key(n, body):
+    """
+    Removes a key from the data of this node
+    :param n: the node from which to remove the key
+    :param body: the request body
+    :return: string of response
+    """
+    def remove():
+        del n.storage[body["key"]]
+    n.event_queue.put(remove)
+
+    return utils.create_request({"status": STATUS_OK if body["key"] in n.storage else STATUS_NOT_FOUND})

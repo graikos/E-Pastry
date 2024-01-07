@@ -92,29 +92,6 @@ class ConnectionPool:
 
         return data
 
-    # TODO: remove if unused
-    def poke_peer(self, peer_addr):
-        """
-        Opens a connection to a peer and closes it immediately
-        Used to kill listener thread on join ring
-        :param peer_addr: address of peer
-        :return: None
-        """
-        client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-        try:
-            client.connect(peer_addr)
-        except ConnectionPool.SocketErrors as e:
-            log.info(f"Error connecting to {peer_addr}, got: {e}")
-            return
-
-        if not client:
-            log.info(f"Failed to connect to {peer_addr}")
-            return
-
-        client.close()
-
     def _send_safe(self, client, enc_request_msg, peer_addr, hold_connection):
         """
         Tries to send a request to a given peer

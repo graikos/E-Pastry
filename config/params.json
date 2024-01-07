@@ -1,6 +1,6 @@
 {
     "seed_server": {
-        "ip": "192.168.1.15",
+        "ip": "192.168.2.7",
         "port": 8000,
         "attempt_limit": 4
     },
@@ -8,12 +8,12 @@
         "server_port": 9150
     },
     "ring": {
-        "bits": 128,
-        "b": 4
+        "bits": 16,
+        "b": 2
     },
     "node": {
-        "L": 16,
-        "M": 16,
+        "L": 4,
+        "M": 4,
         "cache_size": 64
     },
     "net": {
@@ -23,5 +23,9 @@
     },
     "logging": {
         "level": "DEBUG"
+    },
+    "testing": {
+        "initial_port": 8120,
+        "total_nodes": 500
     }
 }

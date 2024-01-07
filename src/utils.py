@@ -3,8 +3,12 @@ import socket
 import math
 import logging
 import json
+from hashlib import sha1
 from os import environ
 from types import GeneratorType
+from bisect import bisect_left
+
+hash_func = sha1
 
 # get configuration settings from params.json
 with open("config/params.json") as f:
@@ -64,19 +68,6 @@ def get_longest_common_prefix(digits1, digits2):
     return count
 
 
-def get_ring_distance(id1, id2):
-    """
-    Returns the distance between two ids on the ring
-    :param id1: first id
-    :param id2: second id
-    :return: the distance
-    """
-    return min(
-        abs(id1 - id2),
-        abs(id1 - id2 + (-1 if id2 < id1 else 1) * 2 ** params["ring"]["bits"]),
-    )
-
-
 def get_numerically_closest(link1, link2, key):
     """
     Returns the id that is numerically closest to the key
@@ -85,8 +76,8 @@ def get_numerically_closest(link1, link2, key):
     :param link2: link of second node
     :param key: key to compare to
     """
-    dist1 = get_ring_distance(link1.node_id, key)
-    dist2 = get_ring_distance(link2.node_id, key)
+    dist1 = abs(link1.node_id - key)
+    dist2 = abs(link2.node_id - key)
 
     if dist1 < dist2:
         return link1
@@ -112,7 +103,7 @@ def get_ip():
     return ip
 
 
-def create_request(header_dict, body_dict):
+def create_request(header_dict, body_dict={}):
     """
     Creates request from passed header and body
     :param header_dict: dictionary of header
@@ -125,26 +116,28 @@ def create_request(header_dict, body_dict):
     return request_msg
 
 
-def insert_sorted(lst, item, maxlen, remove=0, comp=lambda x, y: x > y):
+def insert_sorted(lst, item, maxlen, remove=0, comp=lambda x: x, eq=lambda x: x):
     """
     Inserts item into list in sorted order
+    If element already exists, does not insert
     :param lst: list to insert into
     :param item: item to insert
     :param maxlen: maximum length of list
     :param remove: which item to remove if list is full after insertion (0 for first, -1 for last)
-    :param comp: comparison function for sorting
+    :param comp: comparison function to use during search
+    :param eq: equality function to use to determine if item already exists
     :return: None
     """
     if len(lst) == 0:
         lst.append(item)
         return
 
-    for i, elem in enumerate(lst):
-        if comp(elem, item):
-            lst.insert(i, item)
-            break
-    else:
-        lst.append(item)
+    insert_index = bisect_left(lst, comp(item), key=comp)
+
+    if insert_index < len(lst) and eq(lst[insert_index]) == eq(item):
+        return
+
+    lst.insert(insert_index, item)
 
     if len(lst) > maxlen:
         lst.pop(remove)
