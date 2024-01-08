@@ -21,6 +21,7 @@ from src.rpc_handlers import (
 
 Link.hash_func = hash_func
 
+
 class Node:
     def __init__(self, port=None):
         # random location for node
@@ -39,6 +40,7 @@ class Node:
         self.leaf_set_greater = []
 
         self.neighborhood_set = []
+        self.current_neighbor = 0  # used for polling
 
         self.routing_table = [
             [None] * 2 ** utils.params["ring"]["b"]
@@ -117,6 +119,7 @@ class Node:
                             "node_id": self.node_id,
                             "start_row": 0,
                             "initial": True,
+                            "route_ids": [],
                         },
                     )
 
@@ -296,7 +299,7 @@ class Node:
             else:
                 self.leaf_set_greater[0:0] = self.leaf_set_smaller
                 self.leaf_set_greater = self.leaf_set_greater[
-                    : utils.params["node"]["L"] // 2 
+                    : utils.params["node"]["L"] // 2
                 ]
                 self.leaf_set_smaller = []
 
@@ -313,7 +316,7 @@ class Node:
                 utils.params["node"]["L"] // 2,
                 remove=0,
                 comp=lambda x: x.node_id,
-                eq=lambda x: x.node_id
+                eq=lambda x: x.node_id,
             )
         else:
             utils.insert_sorted(
@@ -322,7 +325,7 @@ class Node:
                 utils.params["node"]["L"] // 2,
                 remove=-1,
                 comp=lambda x: x.node_id,
-                eq=lambda x: x.node_id
+                eq=lambda x: x.node_id,
             )
 
     def _update_routing_table(self, response_table, start_index=0):
@@ -337,9 +340,6 @@ class Node:
                     self.routing_table[i + start_index][j] = Link(
                         (node["ip"], node["port"]), node["node_id"]
                     )
-                    # TODO Remove this
-                    if type(node["node_id"]) is list:
-                        log.debug(f"node id list is: {self.node_id}")
                     self.insert_into_leaf_set(self.routing_table[i + start_index][j])
 
     def find_key(self, key):
@@ -375,7 +375,11 @@ class Node:
             log.debug("Could not find node")
             return False
 
-        response = self.ask_peer((new_node["ip"], new_node["port"]), "store_key", {"key": key, "value": value})
+        response = self.ask_peer(
+            (new_node["ip"], new_node["port"]),
+            "store_key",
+            {"key": key, "value": value},
+        )
 
         if not response or response["header"]["status"] not in range(200, 300):
             log.debug("Could not store key")
@@ -395,13 +399,15 @@ class Node:
         if new_node is None:
             log.debug("Could not find node")
             return False
-        
-        response = self.ask_peer((new_node["ip"], new_node["port"]), "delete_key", {"key": key})
+
+        response = self.ask_peer(
+            (new_node["ip"], new_node["port"]), "delete_key", {"key": key}
+        )
 
         if not response or response["header"]["status"] not in range(200, 300):
             log.debug("Could not delete key")
             return False
-        
+
         log.debug("Deleted pair")
         return True
 
@@ -427,19 +433,20 @@ class Node:
 
         return response["body"]
 
-    def handle_join(self, id, start_row):
+    def handle_join(self, id, start_row, route_ids):
         """
         Handles join request
         :param id: id of node that is joining
         :param start_row: row to start routing table at
+        :param route_ids: list of ids of nodes that are in route
         :return: tuple of (
-            string of response, 
-            whether this is the last node, 
+            string of response,
+            whether this is the last node,
             whether to append routing table rows
         ), or None if request fails
         """
         next_link = self.route(id, is_id=True)
-        
+
         if next_link is None:
             return None
         elif next_link is self.self_link:
@@ -456,18 +463,47 @@ class Node:
                     ],
                 },
                 True,  # value used to inform rpc handler that this is the last node
-                True  # value used to inform rpc handler that routing table rows should be appended
+                True,  # value used to inform rpc handler that routing table rows should be appended
             )
-        
+
         key_digits = list(utils.get_id_digits(id))
-        pass_rows = utils.get_longest_common_prefix(self.node_id_digits, key_digits) < utils.get_longest_common_prefix(list(utils.get_id_digits(next_link.node_id)), key_digits)
+        pass_rows = utils.get_longest_common_prefix(
+            self.node_id_digits, key_digits
+        ) < utils.get_longest_common_prefix(
+            list(utils.get_id_digits(next_link.node_id)), key_digits
+        )
 
         response = self.ask_peer(
             next_link.addr,
             "join",
-            {"node_id": id, "start_row": start_row, "initial": False},
+            {
+                "node_id": id,
+                "start_row": start_row,
+                "initial": False,
+                "route_ids": route_ids + [self.node_id],
+            },
         )
-        if not response or response["header"]["status"] not in range(200, 300):
+        if not response:
+            return None
+
+        if response["header"]["status"] == STATUS_CONFLICT:
+            log.debug("Conflict in route, sending leaf set")
+            return (
+                {
+                    "leaf_set_smaller": [
+                        {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
+                        for n in self.leaf_set_smaller
+                    ],
+                    "leaf_set_greater": [
+                        {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
+                        for n in self.leaf_set_greater
+                    ],
+                },
+                True,  # value used to inform rpc handler that this is the last node
+                True,  # value used to inform rpc handler that routing table rows should be appended
+            )
+
+        if response["header"]["status"] not in range(200, 300):
             return None
 
         return (response["body"], False, pass_rows)
@@ -489,7 +525,9 @@ class Node:
                 node_link = leaf_set[closest_index]
             else:
                 log.debug(f"Leaf set is {leaf_set}")
-                log.debug(f"Comparing {leaf_set[closest_index]} and {leaf_set[closest_index - 1]}")
+                log.debug(
+                    f"Comparing {leaf_set[closest_index]} and {leaf_set[closest_index - 1]}"
+                )
                 node_link = utils.get_numerically_closest(
                     leaf_set[closest_index], leaf_set[closest_index - 1], key_id
                 )
@@ -508,13 +546,78 @@ class Node:
                     + leaf_set
                     + [item for row in self.routing_table[l:] for item in row]
                 ):
-                    if link is not None:
+                    if (
+                        link is not None
+                        and utils.get_longest_common_prefix(
+                            self.node_id_digits, utils.get_id_digits(link.node_id)
+                        )
+                        >= l
+                    ):
                         link_distance = abs(link.node_id - key_id)
                         if link_distance < distance:
                             node_link = link
                             distance = link_distance
 
         return node_link
+
+    def poll_neighbor(self):
+        """
+        Polls a neighbor node
+        If it is dead, asks other neighbors for their neighborhood sets
+        and keeps the closest node that is not already in the neighborhood set
+        :return: None
+        """
+        if len(self.neighborhood_set) == 0:
+            return
+
+        neighbor = self.neighborhood_set[self.current_neighbor]
+        response = self.ask_peer(neighbor.addr, "poll", {}, output=False)
+
+        if not response:
+            self.neighborhood_set.remove(neighbor)
+            if neighbor.node_id in self.id_to_distance:
+                del self.id_to_distance[neighbor.node_id]
+
+            current_neighbors = set(x.node_id for x in self.neighborhood_set)
+            other_neighbors = set()
+            for link in self.neighborhood_set:
+                response = self.ask_peer(link.addr, "get_neighborhood_set", {})
+                if not response:
+                    continue
+
+                other_neighbors |= set(
+                    (
+                        Link((n["ip"], n["port"]), n["node_id"])
+                        for n in response["body"]["neighborhood_set"]
+                    )
+                )
+
+            distance = float("inf")
+            closest_neighbor = None
+            for neighbor in other_neighbors:
+                if neighbor.node_id not in current_neighbors:
+                    if neighbor.node_id in self.id_to_distance:
+                        dist = self.id_to_distance[neighbor.node_id]
+                    else:
+                        dist = self.get_distance_to(neighbor.addr)
+                        if dist is None:
+                            continue
+
+                    if dist < distance:
+                        distance = dist
+                        closest_neighbor = neighbor
+
+            if closest_neighbor is not None:
+                utils.insert_sorted(
+                    self.neighborhood_set,
+                    closest_neighbor,
+                    utils.params["node"]["M"],
+                    remove=-1,
+                    comp=lambda x: self.get_distance_cached(x.node_id, x.addr),
+                    eq=lambda x: x.node_id,
+                )
+
+        self.current_neighbor = (self.current_neighbor + 1) % len(self.neighborhood_set)
 
     def ask_peer(
         self,
@@ -524,6 +627,7 @@ class Node:
         extra_header={},
         pre_request=False,
         hold_connection=True,
+        output=True,
     ):
         """
         Makes request to peer, sending request_msg
@@ -534,6 +638,8 @@ class Node:
         :param body_dict: dictionary of body
         :param extra_header: dictionary of extra header fields
         :param pre_request: whether request should be preceded by request of type size
+        :param hold_connection: whether connection should be held open after request
+        :param output: whether to output debug messages
         :return: string response of peer
         """
         w_mode = self.state_mutex.w_locked()
@@ -549,7 +655,7 @@ class Node:
                 {"type": req_type, **extra_header}, body_dict
             )
             data = self.conn_pool.send(
-                peer_addr, request_msg, pre_request, hold_connection
+                peer_addr, request_msg, pre_request, hold_connection, output
             )
 
         if w_mode:
@@ -614,7 +720,16 @@ class Node:
         connection_listener.name = "Connection Listener"
         connection_listener.daemon = True
 
+        # start timer to handle periodic events
+        timer = threading.Thread(
+            target=self.polling_timer,
+            args=(self.event_queue, utils.params["net"]["polling_interval"]),
+        )
+        timer.name = "Timer"
+        timer.daemon = True
+
         connection_listener.start()
+        timer.start()
 
         while True:
             # wait until event_queue is not empty, then pop
@@ -622,10 +737,10 @@ class Node:
 
             self.state_mutex.w_enter()
 
-            log.debug(f"Popped {data} from event queue")
-
-            # TODO: change this when more events are added other than callables
-            data()
+            if data == 0:
+                self.poll_neighbor()
+            elif callable(data):
+                data()
 
             self.state_mutex.w_leave()
 
@@ -695,11 +810,9 @@ class Node:
                 log.debug(f"RPC call of type {data['header']['type']} missing {arg}")
                 return
 
-        log.debug(f"Got RPC call of type: {data['header']['type']}")
-
-        # TODO REMOVE
-        if data["header"]["type"] == "join":
-            log.debug(f"My leaf set is {self.leaf_set_smaller + [self.self_link] + self.leaf_set_greater}")
+        # TODO: remove
+        if data["header"]["type"] != "poll":
+            log.debug(f"Got RPC call of type: {data['header']['type']}")
 
         # get mutex so main thread doesn't change object data during RPC
         self.state_mutex.r_enter()
@@ -708,3 +821,15 @@ class Node:
         self.state_mutex.r_leave()
 
         connection.sendall(response.encode())
+
+    @staticmethod
+    def polling_timer(event_queue, delay):
+        """
+        Sleeps for specified amount of time, then places 0 in queue
+        :param event_queue: shared queue
+        :param delay: amount of time to sleep for
+        :return: None
+        """
+        while True:
+            time.sleep(delay)
+            event_queue.put(0)

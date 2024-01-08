@@ -2,6 +2,8 @@ import socket
 import selectors
 import time
 import json
+import threading
+from threading import Lock
 
 # project files
 from src import utils
@@ -40,6 +42,8 @@ class ConnectionPool:
             self.server, selectors.EVENT_READ, self._accept_connection_cb
         )
 
+        self.lock = Lock()
+
     def cleanup_outgoing(self):
         """
         Removes all outgoing connections that have timed out
@@ -51,7 +55,9 @@ class ConnectionPool:
             if time.time() - value[1] < utils.params["net"]["connection_lifespan"]
         }
 
-    def send(self, peer_addr, request_msg, pre_request, hold_connection=True):
+    def send(
+        self, peer_addr, request_msg, pre_request, hold_connection=True, output=True
+    ):
         """
         Sends a request to a peer with the given address
         Returns the response from the peer
@@ -60,7 +66,8 @@ class ConnectionPool:
         :param pre_request: boolean indicating if pre-request with size should be sent
         :return: peer response, or False if failed
         """
-        log.debug(f"Sending request to {peer_addr}, msg: {request_msg}")
+        if output:
+            log.debug(f"Sending request to {peer_addr}, msg: {request_msg}")
         client = self._get_connection(peer_addr, hold_connection)
         if not client:
             log.info(f"Failed to connect to {peer_addr}")
@@ -164,9 +171,11 @@ class ConnectionPool:
         conn, addr = sock.accept()
         conn.setblocking(False)
         log.info(f"Accepted connection from {addr}")
+        self.lock.acquire()
         self.selector.register(
             conn, selectors.EVENT_READ, self._read_from_connection_cb
         )
+        self.lock.release()
 
     def _read_from_connection_cb(self, sock, handler):
         """
@@ -181,10 +190,17 @@ class ConnectionPool:
             data = None
 
         if data:
-            handler(sock, data.decode())
+            handler_thread = threading.Thread(
+                target=handler, args=(sock, data.decode())
+            )
+            handler_thread.name = "Connection Handler"
+            handler_thread.daemon = True
+            handler_thread.start()
         else:
             log.info(f"Closing connection")
+            self.lock.acquire()
             self.selector.unregister(sock)
+            self.lock.release()
             sock.close()
 
     def get_seed(self, node_id, coords):

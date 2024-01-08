@@ -2,6 +2,7 @@ import multiprocessing
 from time import sleep
 import os
 import sys
+
 sys.path.append(".")
 os.chdir("..")
 from src import utils
@@ -23,7 +24,7 @@ for _ in range(utils.params["testing"]["total_nodes"]):
     node_details.append(port)
     new_node.start()
     port += 1
-    sleep(.5)
+    sleep(0.1)
 
 try:
     while True:
@@ -31,4 +32,3 @@ try:
 except KeyboardInterrupt:
     for process in processes:
         process.terminate()
-        

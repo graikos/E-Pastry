@@ -271,6 +271,11 @@ class LRUCache:
     def __contains__(self, key):
         return key in self.dict
 
+    def __delitem__(self, key):
+        node = self.dict[key]
+        self._remove_node(node)
+        del self.dict[key]
+
     def __repr__(self):
         return str(self.dict)
 

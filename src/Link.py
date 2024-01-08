@@ -15,7 +15,7 @@ class Link:
         return self.node_id == other.node_id
 
     def __hash__(self):
-        return hash(self.addr)
+        return hash(self.node_id)
 
     def __repr__(self):
         # return str(self.addr)

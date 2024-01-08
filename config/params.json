@@ -1,6 +1,6 @@
 {
     "seed_server": {
-        "ip": "192.168.2.7",
+        "ip": "192.168.1.15",
         "port": 8000,
         "attempt_limit": 4
     },
@@ -19,6 +19,7 @@
     "net": {
         "timeout": 10,
         "connection_lifespan": 60,
+        "polling_interval": 6,
         "data_size": 8192
     },
     "logging": {
@@ -26,6 +27,6 @@
     },
     "testing": {
         "initial_port": 8120,
-        "total_nodes": 500
+        "total_nodes": 200
     }
 }

@@ -10,6 +10,7 @@ STATUS_UPDATE_REQUIRED = 432
 REQUEST_MAP = {
     "poll": lambda n, body: poll(),
     "get_coordinates": lambda n, body: get_coordinates(n),
+    "get_neighborhood_set": lambda n, body: get_neighborhood_set(n),
     "just_joined": lambda n, body: just_joined(n, body),
     "join": lambda n, body: join(n, body),
     "locate_closest": lambda n, body: locate_closest(n, body),
@@ -31,6 +32,7 @@ Format:
 EXPECTED_REQUEST = {
     "poll": (),
     "get_coordinates": (),
+    "get_neighborhood_set": (),
     "just_joined": (
         (
             "in_route",
@@ -51,7 +53,7 @@ EXPECTED_REQUEST = {
             ),
         )
     ),
-    "join": ("node_id", "initial", "start_row"),
+    "join": ("node_id", "initial", "start_row", "route_ids"),
     "locate_closest": ("key",),
     "find_key": ("key",),
     "find_and_store_key": ("key", "value"),
@@ -106,6 +108,23 @@ def get_coordinates(n):
     return utils.create_request(resp_header, resp_body)
 
 
+def get_neighborhood_set(n):
+    """
+    Returns the neighborhood set of the node
+    :param n: node
+    :return: string of response
+    """
+    resp_header = {"status": STATUS_OK}
+    resp_body = {
+        "neighborhood_set": [
+            {"ip": l.addr[0], "port": l.addr[1], "node_id": l.node_id}
+            for l in n.neighborhood_set
+        ]
+    }
+
+    return utils.create_request(resp_header, resp_body)
+
+
 def locate_closest(n, body):
     """
     Finds the closest node to the key and returns its value
@@ -133,6 +152,10 @@ def join(n, body):
     :param body: body of request
     :return: string of response
     """
+    # if node is already in route, return conflict to prevent loops
+    if n.node_id in body["route_ids"]:
+        return utils.create_request({"status": STATUS_CONFLICT})
+
     resp_body = {"routing_table": [], "node_info": {}}
 
     # if initial, append neighborhood set to response
@@ -158,7 +181,7 @@ def join(n, body):
     resp_body["start_row"] = common_prefix + 1
 
     # forward request to next node
-    result = n.handle_join(body["node_id"], resp_body["start_row"])
+    result = n.handle_join(body["node_id"], resp_body["start_row"], body["route_ids"])
 
     if result is None:
         resp_header = {"status": STATUS_NOT_FOUND}
@@ -237,7 +260,13 @@ def find_and_store_key(n, body):
     :param body: the request body
     :return: string of response
     """
-    return utils.create_request({"status": STATUS_OK if n.find_and_store_key(body["key"], body["value"]) else STATUS_NOT_FOUND})
+    return utils.create_request(
+        {
+            "status": STATUS_OK
+            if n.find_and_store_key(body["key"], body["value"])
+            else STATUS_NOT_FOUND
+        }
+    )
 
 
 def find_and_delete_key(n, body):
@@ -247,7 +276,13 @@ def find_and_delete_key(n, body):
     :param body: the request body
     :return: string of response
     """
-    return utils.create_request({"status": STATUS_OK if n.find_and_delete_key(body["key"]) else STATUS_NOT_FOUND})
+    return utils.create_request(
+        {
+            "status": STATUS_OK
+            if n.find_and_delete_key(body["key"])
+            else STATUS_NOT_FOUND
+        }
+    )
 
 
 ## RPCs that write to the node's state
@@ -320,7 +355,7 @@ def just_joined(n, body):
                 new_link,
                 utils.params["node"]["M"],
                 remove=-1,
-                comp=lambda x: n.id_to_distance[x.node_id],
+                comp=lambda x: n.get_distance_cached(x.node_id, x.addr),
                 eq=lambda x: x.node_id,
             )
 
@@ -353,8 +388,11 @@ def store_key(n, body):
     :param body: the request body
     :return: string of response
     """
+
     def store():
-        n.storage.add_key(body["key"], body["value"], utils.get_id(body["key"], utils.hash_func))
+        n.storage.add_key(
+            body["key"], body["value"], utils.get_id(body["key"], utils.hash_func)
+        )
 
     n.event_queue.put(store)
 
@@ -368,8 +406,12 @@ def delete_key(n, body):
     :param body: the request body
     :return: string of response
     """
+
     def remove():
         del n.storage[body["key"]]
+
     n.event_queue.put(remove)
 
-    return utils.create_request({"status": STATUS_OK if body["key"] in n.storage else STATUS_NOT_FOUND})
+    return utils.create_request(
+        {"status": STATUS_OK if body["key"] in n.storage else STATUS_NOT_FOUND}
+    )
