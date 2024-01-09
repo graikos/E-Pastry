@@ -24,7 +24,7 @@ for _ in range(utils.params["testing"]["total_nodes"]):
     node_details.append(port)
     new_node.start()
     port += 1
-    sleep(0.1)
+    sleep(utils.params["testing"]["insert_delay"])
 
 try:
     while True:

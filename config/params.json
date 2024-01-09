@@ -27,6 +27,7 @@
     },
     "testing": {
         "initial_port": 8120,
-        "total_nodes": 200
+        "total_nodes": 400,
+        "insert_delay": 0.5
     }
 }

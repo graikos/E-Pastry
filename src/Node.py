@@ -348,7 +348,7 @@ class Node:
         :param key: key to find
         :return: value of key, or None if key is not found
         """
-        new_node = self.locate_closest(key)
+        new_node = self.locate_closest(key, [self.node_id])
         if new_node is None:
             return None
 
@@ -369,7 +369,7 @@ class Node:
         :param value: the value of the key
         :return: bool, whether the insertion was successful
         """
-        new_node = self.locate_closest(key)
+        new_node = self.locate_closest(key, [self.node_id])
 
         if new_node is None:
             log.debug("Could not find node")
@@ -394,7 +394,7 @@ class Node:
         :param key: the key
         :return: bool, whether the deletion was successful
         """
-        new_node = self.locate_closest(key)
+        new_node = self.locate_closest(key, [self.node_id])
 
         if new_node is None:
             log.debug("Could not find node")
@@ -411,10 +411,11 @@ class Node:
         log.debug("Deleted pair")
         return True
 
-    def locate_closest(self, key):
+    def locate_closest(self, key, route_ids):
         """
         Locates node that is responsible for key and returns it
         :param key: key to find
+        :param route_ids: list of ids of nodes that are in route
         :return: address and id of node that is responsible for key, or None if key is not found
         """
         next_link = self.route(key)
@@ -427,8 +428,23 @@ class Node:
                 "node_id": self.node_id,
             }
 
-        response = self.ask_peer(next_link.addr, "locate_closest", {"key": key})
-        if not response or response["header"]["status"] not in range(200, 300):
+        response = self.ask_peer(
+            next_link.addr,
+            "locate_closest",
+            {"key": key, "route_ids": route_ids + [self.node_id]},
+        )
+        if not response:
+            return None
+
+        if response["header"]["status"] == STATUS_CONFLICT:
+            log.debug("Conflict in lookup route, stopping")
+            return {
+                "ip": self.conn_pool.SERVER_ADDR[0],
+                "port": self.conn_pool.SERVER_ADDR[1],
+                "node_id": self.node_id,
+            }
+
+        if response["header"]["status"] not in range(200, 300) or not response["body"]:
             return None
 
         return response["body"]
@@ -487,7 +503,7 @@ class Node:
             return None
 
         if response["header"]["status"] == STATUS_CONFLICT:
-            log.debug("Conflict in route, sending leaf set")
+            log.debug("Conflict in join route, sending leaf set")
             return (
                 {
                     "leaf_set_smaller": [

@@ -54,7 +54,7 @@ EXPECTED_REQUEST = {
         )
     ),
     "join": ("node_id", "initial", "start_row", "route_ids"),
-    "locate_closest": ("key",),
+    "locate_closest": ("key", "route_ids"),
     "find_key": ("key",),
     "find_and_store_key": ("key", "value"),
     "find_and_delete_key": ("key",),
@@ -133,7 +133,10 @@ def locate_closest(n, body):
     :param body: body of request
     :return: string of response
     """
-    closest = n.locate_closest(body["key"])
+    if n.node_id in body["route_ids"]:
+        return utils.create_request({"status": STATUS_CONFLICT})
+
+    closest = n.locate_closest(body["key"], body["route_ids"])
 
     if closest is not None:
         resp_header = {"status": STATUS_OK}
