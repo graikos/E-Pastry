@@ -2,6 +2,7 @@ from src import utils
 from src.Link import Link
 
 STATUS_OK = 200
+STATUS_BAD_REQUEST = 400
 STATUS_NOT_FOUND = 404
 STATUS_CONFLICT = 409
 STATUS_UPDATE_REQUIRED = 432
@@ -11,6 +12,8 @@ REQUEST_MAP = {
     "poll": lambda n, body: poll(),
     "get_coordinates": lambda n, body: get_coordinates(n),
     "get_neighborhood_set": lambda n, body: get_neighborhood_set(n),
+    "get_leaf_set": lambda n, body: get_leaf_set(n),
+    "get_routing_table_node": lambda n, body: get_routing_table_node(n, body),
     "just_joined": lambda n, body: just_joined(n, body),
     "join": lambda n, body: join(n, body),
     "locate_closest": lambda n, body: locate_closest(n, body),
@@ -33,6 +36,8 @@ EXPECTED_REQUEST = {
     "poll": (),
     "get_coordinates": (),
     "get_neighborhood_set": (),
+    "get_leaf_set": (),
+    "get_routing_table_node": ("row", "col"),
     "just_joined": (
         (
             "in_route",
@@ -121,6 +126,52 @@ def get_neighborhood_set(n):
             for l in n.neighborhood_set
         ]
     }
+
+    return utils.create_request(resp_header, resp_body)
+
+
+def get_leaf_set(n):
+    """
+    Returns the leaf set of the node
+    :param n: node
+    :return: string of response
+    """
+    resp_header = {"status": STATUS_OK}
+    resp_body = {
+        "leaf_set": [
+            {"ip": l.addr[0], "port": l.addr[1], "node_id": l.node_id}
+            for l in n.leaf_set_smaller + n.leaf_set_greater
+        ]
+    }
+
+    return utils.create_request(resp_header, resp_body)
+
+
+def get_routing_table_node(n, body):
+    """
+    Returns the node in the routing table at the specified coordinates
+    :param n: node
+    :param body: body of request
+    :return: string of response
+    """
+    resp_header = {"status": STATUS_OK}
+    resp_body = {}
+
+    if (
+        body["row"] < 0
+        or body["row"] >= len(n.routing_table)
+        or body["col"] < 0
+        or body["col"] >= len(n.routing_table[0])
+    ):
+        resp_header["status"] = STATUS_BAD_REQUEST
+    elif n.routing_table[body["row"]][body["col"]] is None:
+        resp_header["status"] = STATUS_NOT_FOUND
+    else:
+        resp_body = {
+            "ip": n.routing_table[body["row"]][body["col"]].addr[0],
+            "port": n.routing_table[body["row"]][body["col"]].addr[1],
+            "node_id": n.routing_table[body["row"]][body["col"]].node_id,
+        }
 
     return utils.create_request(resp_header, resp_body)
 

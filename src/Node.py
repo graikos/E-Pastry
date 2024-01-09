@@ -348,7 +348,7 @@ class Node:
         :param key: key to find
         :return: value of key, or None if key is not found
         """
-        new_node = self.locate_closest(key, [self.node_id])
+        new_node = self.locate_closest(key)
         if new_node is None:
             return None
 
@@ -369,7 +369,7 @@ class Node:
         :param value: the value of the key
         :return: bool, whether the insertion was successful
         """
-        new_node = self.locate_closest(key, [self.node_id])
+        new_node = self.locate_closest(key)
 
         if new_node is None:
             log.debug("Could not find node")
@@ -394,7 +394,7 @@ class Node:
         :param key: the key
         :return: bool, whether the deletion was successful
         """
-        new_node = self.locate_closest(key, [self.node_id])
+        new_node = self.locate_closest(key)
 
         if new_node is None:
             log.debug("Could not find node")
@@ -411,29 +411,43 @@ class Node:
         log.debug("Deleted pair")
         return True
 
-    def locate_closest(self, key, route_ids):
+    def locate_closest(self, key, route_ids=[]):
         """
         Locates node that is responsible for key and returns it
         :param key: key to find
         :param route_ids: list of ids of nodes that are in route
         :return: address and id of node that is responsible for key, or None if key is not found
         """
-        next_link = self.route(key)
-        if next_link is None:
-            return None
-        elif next_link is self.self_link:
-            return {
-                "ip": self.conn_pool.SERVER_ADDR[0],
-                "port": self.conn_pool.SERVER_ADDR[1],
-                "node_id": self.node_id,
-            }
+        for _ in range(utils.params["net"]["routing_attempts"]):
+            next_link, location, idx = self.route(key)
+            if next_link is None:
+                return None
+            elif next_link is self.self_link:
+                return {
+                    "ip": self.conn_pool.SERVER_ADDR[0],
+                    "port": self.conn_pool.SERVER_ADDR[1],
+                    "node_id": self.node_id,
+                }
 
-        response = self.ask_peer(
-            next_link.addr,
-            "locate_closest",
-            {"key": key, "route_ids": route_ids + [self.node_id]},
-        )
-        if not response:
+            response = self.ask_peer(
+                next_link.addr,
+                "locate_closest",
+                {"key": key, "route_ids": route_ids + [self.node_id]},
+            )
+
+            if not response:
+                if location in (0, 1):
+                    log.debug(f"Replacing {idx} in leaf set {location}")
+                    log.debug(
+                        f"Leaf set: {self.leaf_set_smaller} {self.leaf_set_greater}"
+                    )
+                    self.replace_leaf(idx, location)
+                elif location == 3:
+                    self.replace_routing_table_link(idx)
+                continue
+
+            break
+        else:
             return None
 
         if response["header"]["status"] == STATUS_CONFLICT:
@@ -461,45 +475,55 @@ class Node:
             whether to append routing table rows
         ), or None if request fails
         """
-        next_link = self.route(id, is_id=True)
+        for _ in range(utils.params["net"]["routing_attempts"]):
+            next_link, location, idx = self.route(id, is_id=True)
 
-        if next_link is None:
-            return None
-        elif next_link is self.self_link:
-            log.debug("Last node in route, sending leaf set")
-            return (
-                {
-                    "leaf_set_smaller": [
-                        {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
-                        for n in self.leaf_set_smaller
-                    ],
-                    "leaf_set_greater": [
-                        {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
-                        for n in self.leaf_set_greater
-                    ],
-                },
-                True,  # value used to inform rpc handler that this is the last node
-                True,  # value used to inform rpc handler that routing table rows should be appended
+            if next_link is None:
+                return None
+            elif next_link is self.self_link:
+                log.debug("Last node in route, sending leaf set")
+                return (
+                    {
+                        "leaf_set_smaller": [
+                            {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
+                            for n in self.leaf_set_smaller
+                        ],
+                        "leaf_set_greater": [
+                            {"ip": n.addr[0], "port": n.addr[1], "node_id": n.node_id}
+                            for n in self.leaf_set_greater
+                        ],
+                    },
+                    True,  # value used to inform rpc handler that this is the last node
+                    True,  # value used to inform rpc handler that routing table rows should be appended
+                )
+
+            key_digits = list(utils.get_id_digits(id))
+            pass_rows = utils.get_longest_common_prefix(
+                self.node_id_digits, key_digits
+            ) < utils.get_longest_common_prefix(
+                list(utils.get_id_digits(next_link.node_id)), key_digits
             )
 
-        key_digits = list(utils.get_id_digits(id))
-        pass_rows = utils.get_longest_common_prefix(
-            self.node_id_digits, key_digits
-        ) < utils.get_longest_common_prefix(
-            list(utils.get_id_digits(next_link.node_id)), key_digits
-        )
+            response = self.ask_peer(
+                next_link.addr,
+                "join",
+                {
+                    "node_id": id,
+                    "start_row": start_row,
+                    "initial": False,
+                    "route_ids": route_ids + [self.node_id],
+                },
+            )
 
-        response = self.ask_peer(
-            next_link.addr,
-            "join",
-            {
-                "node_id": id,
-                "start_row": start_row,
-                "initial": False,
-                "route_ids": route_ids + [self.node_id],
-            },
-        )
-        if not response:
+            if not response:
+                if location in (0, 1):
+                    self.replace_leaf(idx, location)
+                elif location == 3:
+                    self.replace_routing_table_link(idx)
+                continue
+
+            break
+        else:
             return None
 
         if response["header"]["status"] == STATUS_CONFLICT:
@@ -529,16 +553,24 @@ class Node:
         Finds node that is responsible for key and returns it
         :param key: key to find
         :param is_id: whether key is already an id
-        :return: value of key, or None if key is not found
+        :return: (
+            node_link,
+            0 if node is in leaf set smaller, 1 if node is in leaf set greater, 2 if node is in neighborhood set, 3 if node is in routing table
+            index in leaf set or neighborhood set, or tuple of (row, column) in routing table
+        ), or None if key is not found
         """
         key_id = utils.get_id(key, hash_func) if not is_id else key
 
         leaf_set = self.leaf_set_smaller + [self.self_link] + self.leaf_set_greater
+
+        location = None
+        index = None
         # if key is in leaf set, return closest node
         if leaf_set[0].node_id <= key_id <= leaf_set[-1].node_id:
             closest_index = bisect_left(leaf_set, key_id, key=lambda x: x.node_id)
             if leaf_set[closest_index].node_id == key_id:
                 node_link = leaf_set[closest_index]
+
             else:
                 log.debug(f"Leaf set is {leaf_set}")
                 log.debug(
@@ -547,7 +579,16 @@ class Node:
                 node_link = utils.get_numerically_closest(
                     leaf_set[closest_index], leaf_set[closest_index - 1], key_id
                 )
-                log.debug(f"Closest node: {node_link}")
+                log.debug(f"Closest is: {node_link.node_id}")
+
+            closest_index -= 0 if node_link is leaf_set[closest_index] else 1
+            location = 0 if closest_index < len(self.leaf_set_smaller) else 1
+            index = (
+                closest_index
+                if location == 0
+                else closest_index - len(self.leaf_set_smaller) - 1
+            )
+
         # else, find closest node in routing table
         else:
             key_digits = list(utils.get_id_digits(key_id))
@@ -557,9 +598,9 @@ class Node:
                 # rare case where node is not in routing table
                 node_link = self.self_link
                 distance = abs(self.node_id - key_id)
-                for link in (
-                    self.neighborhood_set
-                    + leaf_set
+                for i, link in enumerate(
+                    leaf_set
+                    + self.neighborhood_set
                     + [item for row in self.routing_table[l:] for item in row]
                 ):
                     if (
@@ -573,8 +614,153 @@ class Node:
                         if link_distance < distance:
                             node_link = link
                             distance = link_distance
+                            if i < len(leaf_set):
+                                location = 0 if i < len(self.leaf_set_smaller) else 1
+                                index = (
+                                    i
+                                    if location == 0
+                                    else i - len(self.leaf_set_smaller) - 1
+                                )
+                            elif i < len(leaf_set) + len(self.neighborhood_set):
+                                location = 2
+                                index = i - len(leaf_set)
+                            else:
+                                location = 3
+                                routing_table_index = (
+                                    i - len(self.neighborhood_set) - len(leaf_set)
+                                )
+                                index = (
+                                    routing_table_index // len(self.routing_table[0]),
+                                    routing_table_index % len(self.routing_table[0]),
+                                )
+            else:
+                location = 3
+                index = (l, key_digits[l])
 
-        return node_link
+        return (node_link, location, index)
+
+    def _replace_leaf(self, index, leaf_set, dir):
+        """
+        Replace leaf set procedure
+        :param index: index of node to replace
+        :param leaf_set: the leaf set
+        :param dir: 0 for smaller, 1 for greater
+        :return: None
+        """
+        for i, link in (
+            enumerate(leaf_set) if dir == 0 else reversed(list(enumerate(leaf_set)))
+        ):
+            if i != index:
+                response = self.ask_peer(link.addr, "get_leaf_set", {})
+                if not response:
+                    continue
+
+                break
+        else:
+            # if this happens, all nodes in leaf set are dead
+            leaf_set.pop(index)
+            return
+
+        smaller_id = None if index == 0 else leaf_set[index - 1].node_id
+        greater_id = None if index == len(leaf_set) - 1 else leaf_set[index + 1].node_id
+
+        for node in response["body"]["leaf_set"]:
+            if (
+                smaller_id is None
+                and node["node_id"] < greater_id
+                or greater_id is None
+                and node["node_id"] > smaller_id
+                or not (smaller_id is None or greater_id is None)
+                and smaller_id < node["node_id"] < greater_id
+            ) and node["node_id"] not in (self.node_id, leaf_set[index].node_id):
+                response = self.ask_peer(
+                    (node["ip"], node["port"]), "poll", {}, output=False
+                )
+                if not response:
+                    continue
+                leaf_set[index] = Link((node["ip"], node["port"]), node["node_id"])
+                break
+        else:
+            # if no node is found, just remove node from leaf set
+            leaf_set.pop(index)
+
+    def replace_leaf(self, index, leaf_set=0):
+        """
+        Replaces a (dead) node in the leaf set
+        :param index: index of node to replace (assumed to be correct index)
+        :param leaf_set: which leaf set to replace node in (0 for smaller, 1 for greater)
+        :return: None
+        """
+        log.debug(
+            f"Replacing leaf with id {self.leaf_set_smaller[index].node_id if leaf_set == 0 else self.leaf_set_greater[index].node_id}"
+        )
+        if leaf_set == 0:
+            if len(self.leaf_set_smaller) == 1:
+                self.leaf_set_smaller = []
+            else:
+                self._replace_leaf(index, self.leaf_set_smaller, 0)
+        else:
+            if len(self.leaf_set_greater) == 1:
+                self.leaf_set_greater = []
+            else:
+                self._replace_leaf(index, self.leaf_set_greater, 1)
+
+    def replace_routing_table_link(self, pos):
+        """
+        Replaces a (dead) node in the routing table
+        :param pos: tuple of (row, column) of node to replace
+        :return: None
+        """
+        # first ask nodes in the same row
+        response = None
+        found = False
+        for row in range(pos[0], len(self.routing_table)):
+            for i, link in enumerate(self.routing_table[row]):
+                if (
+                    link is not None
+                    and link is not self.self_link
+                    and (i != pos[1] or row != pos[0])
+                ):
+                    response = self.ask_peer(
+                        link.addr,
+                        "get_routing_table_node",
+                        {"row": pos[0], "col": pos[1]},
+                    )
+                    if not response or response["header"]["status"] not in range(
+                        200, 300
+                    ):
+                        continue
+
+                    if response["body"]["node_id"] in (
+                        self.node_id,
+                        self.routing_table[pos[0]][pos[1]].node_id,
+                    ):
+                        continue
+
+                    response = self.ask_peer(
+                        (response["body"]["ip"], response["body"]["port"]),
+                        "poll",
+                        {},
+                        output=False,
+                    )
+
+                    if not response:
+                        continue
+
+                    found = True
+                    break
+            if found:
+                break
+        else:
+            self.routing_table[pos[0]][pos[1]] = None
+            return
+
+        log.debug(f"Got response: {response}")
+
+        self.routing_table[pos[0]][pos[1]] = Link(
+            (response["body"]["ip"], response["body"]["port"]),
+            response["body"]["node_id"],
+        )
 
     def poll_neighbor(self):
         """
@@ -594,7 +780,9 @@ class Node:
             if neighbor.node_id in self.id_to_distance:
                 del self.id_to_distance[neighbor.node_id]
 
-            current_neighbors = set(x.node_id for x in self.neighborhood_set)
+            current_neighbors = set(x.node_id for x in self.neighborhood_set) | {
+                self.node_id
+            }
             other_neighbors = set()
             for link in self.neighborhood_set:
                 response = self.ask_peer(link.addr, "get_neighborhood_set", {})
@@ -633,7 +821,11 @@ class Node:
                     eq=lambda x: x.node_id,
                 )
 
-        self.current_neighbor = (self.current_neighbor + 1) % len(self.neighborhood_set)
+        self.current_neighbor = (
+            (self.current_neighbor + 1) % len(self.neighborhood_set)
+            if self.neighborhood_set
+            else 0
+        )
 
     def ask_peer(
         self,
