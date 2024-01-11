@@ -47,13 +47,17 @@ class ConnectionPool:
     def cleanup_outgoing(self):
         """
         Removes all outgoing connections that have timed out
+        Does not require a lock, since it should only be called from the writer thread
         :return: None
         """
-        self.outgoing_connections = {
-            key: value
-            for key, value in self.outgoing_connections.items()
-            if time.time() - value[1] < utils.params["net"]["connection_lifespan"]
-        }
+        outgoing_connections = {}
+        for key, value in self.outgoing_connections.items():
+            if time.time() - value[1] > utils.params["net"]["connection_lifespan"]:
+                value[0].close()
+                continue
+            outgoing_connections[key] = value
+
+        self.outgoing_connections = outgoing_connections
 
     def send(
         self, peer_addr, request_msg, pre_request, hold_connection=True, output=True
@@ -68,7 +72,7 @@ class ConnectionPool:
         """
         if output:
             log.debug(f"Sending request to {peer_addr}, msg: {request_msg}")
-        client = self._get_connection(peer_addr, hold_connection)
+        client, client_lock = self._get_connection(peer_addr, hold_connection)
         if not client:
             log.info(f"Failed to connect to {peer_addr}")
             return False
@@ -88,6 +92,8 @@ class ConnectionPool:
             client, pre_req_msg.encode() + enc_request_msg, peer_addr, hold_connection
         )
         if not success:
+            if client_lock is not None:
+                client_lock.release()
             return False
 
         # catch timeout in case peer drops after receiving request
@@ -96,6 +102,9 @@ class ConnectionPool:
         except ConnectionPool.SocketErrors as e:
             log.info(f"Error receiving from connection to {peer_addr}, got: {e}")
             return False
+        finally:
+            if client_lock is not None:
+                client_lock.release()
 
         return data
 
@@ -112,13 +121,24 @@ class ConnectionPool:
         try:
             client.sendall(enc_request_msg)
         except ConnectionPool.SocketErrors as e:
-            del self.outgoing_connections[peer_addr]
-            client = self._get_connection(peer_addr, hold_connection)
+            client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            client.settimeout(utils.params["net"]["timeout"])
+            try:
+                client.connect(peer_addr)
+            except ConnectionPool.SocketErrors as e:
+                log.info(
+                    f"Failed to connect to {peer_addr} while safe-sending, got: {e}"
+                )
+                return False
+
             if not client:
                 log.info(
                     f"Failed to connect to {peer_addr} while safe-sending, got: {e}"
                 )
                 return False
+
+            self.outgoing_connections[peer_addr][0:2] = [client, time.time()]
             client.sendall(enc_request_msg)
 
         return True
@@ -130,11 +150,15 @@ class ConnectionPool:
         Otherwise, a new connection is opened
         :param addr: address of peer
         :param hold_connection: boolean indicating if the connection should be held
-        :return: connection to peer, or False if failed
+        :return: connection and lock of peer, or None, None if failed
         """
-        if addr in self.outgoing_connections:
+        if addr in self.outgoing_connections and not hold_connection:
+            self.outgoing_connections[addr][2].acquire()
             self.outgoing_connections[addr][1] = time.time()
-            return self.outgoing_connections[addr][0]
+            return (
+                self.outgoing_connections[addr][0],
+                self.outgoing_connections[addr][2],
+            )
 
         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -143,12 +167,14 @@ class ConnectionPool:
             client.connect(addr)
         except ConnectionPool.SocketErrors as e:
             log.info(f"Error connecting to new connection {addr}, got: {e}")
-            return False
+            return None, None
 
         if hold_connection:
-            self.outgoing_connections[addr] = [client, time.time()]
+            self.outgoing_connections[addr] = [client, None, threading.Lock()]
+            self.outgoing_connections[addr][2].acquire()
+            self.outgoing_connections[addr][1] = time.time()
 
-        return client
+        return client, self.outgoing_connections[addr][2] if hold_connection else None
 
     def select_incoming(self, handler):
         """
@@ -170,7 +196,7 @@ class ConnectionPool:
         """
         conn, addr = sock.accept()
         conn.setblocking(False)
-        log.info(f"Accepted connection from {addr}")
+        # log.info(f"Accepted connection from {addr}")
         self.lock.acquire()
         self.selector.register(
             conn, selectors.EVENT_READ, self._read_from_connection_cb
@@ -197,7 +223,6 @@ class ConnectionPool:
             handler_thread.daemon = True
             handler_thread.start()
         else:
-            log.info(f"Closing connection")
             self.lock.acquire()
             self.selector.unregister(sock)
             self.lock.release()
