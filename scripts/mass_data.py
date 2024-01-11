@@ -18,10 +18,12 @@ from src import utils
 if argv[2] in ("insert", "i"):
     req = "find_and_store_key"
     req_body = lambda e: {"key": e, "value": data[e]}
+    insert = True
     print("Inserting keys...")
 elif argv[2] in ("lookup", "l"):
     req = "find_key"
     req_body = lambda e: {"key": e}
+    insert = False
     print("Looking up keys...")
 else:
     print("Expected request type (i, l) as second argument.")
@@ -41,6 +43,14 @@ try:
 except IndexError:
     pass
 
+try:
+    if insert:
+        raise FileNotFoundError
+    with open("scripts/lost_keys.dat", "r") as f:
+        lost_keys = set([k.strip() for k in f.readlines()])
+except FileNotFoundError:
+    lost_keys = set()
+
 if delay is not None and s + delay > time():
     sleep(delay - (time() - s))
 
@@ -51,6 +61,8 @@ ports = range(
     utils.params["testing"]["initial_port"],
     utils.params["testing"]["initial_port"] + utils.params["testing"]["total_nodes"],
 )
+
+data = {k: v for k, v in data.items() if k not in lost_keys}
 
 for event in data:
     response = None

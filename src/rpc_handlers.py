@@ -22,7 +22,7 @@ REQUEST_MAP = {
     "find_and_delete_key": lambda n, body: find_and_delete_key(n, body),
     "lookup": lambda n, body: lookup(n, body),
     "store_key": lambda n, body: store_key(n, body),
-    "leave_ring": lambda n, body: leave_ring(n),
+    "debug_leave_ring": lambda n, body: debug_leave_ring(n),
     "delete_key": lambda n, body: delete_key(n, body),
     "debug_state": lambda n, body: debug_state(n),
 }
@@ -66,7 +66,7 @@ EXPECTED_REQUEST = {
     "find_and_delete_key": ("key",),
     "lookup": ("key",),
     "store_key": ("key", "value"),
-    "leave_ring": (),
+    "debug_leave_ring": (),
     "delete_key": ("key",),
     "debug_state": (),
 }
@@ -341,21 +341,20 @@ def find_and_delete_key(n, body):
     )
 
 
-def leave_ring(n):
+def debug_leave_ring(n):
     """
     Tells node n to leave the ring
+    Response contains all keys stored in the node
     :param n: the node
     :return: None
     """
-
     def leave():
         n.leaving = True
 
     n.event_queue.put(1)
     n.event_queue.put(leave)
 
-    resp_header = {"status": STATUS_OK}
-    return utils.create_request(resp_header, {})
+    return utils.create_request({"status": STATUS_OK}, {"keys": n.storage.dump_keys()})
 
 
 ## RPCs that write to the node's state

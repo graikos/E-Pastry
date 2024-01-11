@@ -1049,6 +1049,7 @@ class Node:
             self.state_mutex.w_enter()
 
             if data == 0:
+                log.info("Executing periodic events...")
                 self.poll_neighbor()
                 self.conn_pool.cleanup_outgoing()
             elif callable(data):
@@ -1125,6 +1126,7 @@ class Node:
         # get mutex so main thread doesn't change object data during RPC
         self.state_mutex.r_enter()
         # select RPC handler according to RPC type
+        log.info(f"Handling RPC call of type {data['header']['type']}")
         response = REQUEST_MAP[data["header"]["type"]](self, data["body"])
         self.state_mutex.r_leave()
 

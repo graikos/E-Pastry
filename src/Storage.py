@@ -85,8 +85,8 @@ class Storage:
 
     def dump(self):
         """
-        | Dumps all storage data into a list of dictionaries, each having three keys: key, value, key_id with their
-        | corresponding values
+        Dumps all storage data into a list of dictionaries, each having three keys: key, value, key_id with their
+        corresponding values
         :return: the list of dicts
         """
         d = []
@@ -94,3 +94,10 @@ class Storage:
             d.append({"key": key, "value": self[key], "key_id": self.get_id(key)})
 
         return d
+
+    def dump_keys(self):
+        """
+        Dumps alll storage keys into a list
+        :return: the list of keys
+        """
+        return list(self.keys_to_vals.keys())

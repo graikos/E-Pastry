@@ -29,7 +29,7 @@
     "testing": {
         "initial_port": 8120,
         "total_nodes": 100,
-        "insert_delay": 0.5,
+        "insert_delay": 1,
         "percentage_to_remove": 10
     }
 }
