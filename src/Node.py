@@ -93,6 +93,11 @@ class Node:
             Each node on the route extends the routing table with the requires row(s)
             Node A appends its neighborhood set, while Z appends its leaf set
             The final response contains the resulting sets and the routing table
+            2. Send a just_joined message to each node in the routing path
+            Information about each node, as well as what that node provided, is included
+            in the response to the join message
+            This message informs each node that the new node has joined, so those nodes can
+            update their state accordingly
         """
         response = None
         while True:
