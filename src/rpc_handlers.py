@@ -348,6 +348,7 @@ def debug_leave_ring(n):
     :param n: the node
     :return: None
     """
+
     def leave():
         n.leaving = True
 

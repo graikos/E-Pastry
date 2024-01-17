@@ -20,7 +20,7 @@ while (
     < utils.params["testing"]["percentage_to_remove"]
 ):
     n = choice(total_nodes)
-    response =  utils.ask_peer(("", n), "debug_leave_ring", {})
+    response = utils.ask_peer(("", n), "debug_leave_ring", {})
 
     if not response:
         continue

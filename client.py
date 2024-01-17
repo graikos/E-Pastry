@@ -11,9 +11,10 @@ HELP_MSG = (
 )
 
 command_help = {
-    "lookup": "Usage: lookup [key]\n" "Finds value of given key in E-Chord.",
-    "insert": "Usage: insert [key] [value]\n" "Inserts pair (key, value) into E-Chord.",
-    "delete": "Usage: delete [key]\n" "Deletes key from E-Chord.",
+    "lookup": "Usage: lookup [key]\n" "Finds value of given key in E-Pastry.",
+    "insert": "Usage: insert [key] [value]\n"
+    "Inserts pair (key, value) into E-Pastry.",
+    "delete": "Usage: delete [key]\n" "Deletes key from E-Pastry.",
     "leave": "Usage: leave\n" "Tells node to leave ring",
     "debug": "Usage: debug [type]\n",
     "help": HELP_MSG,

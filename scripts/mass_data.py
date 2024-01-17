@@ -29,22 +29,30 @@ else:
     print("Expected request type (i, l) as second argument.")
     exit(1)
 
+skip_keys = None
+
+try:
+    skip_keys = argv[3].lower() == "skip"
+except IndexError:
+    pass
+
 stop_at = None
 
 try:
-    stop_at = int(argv[3])
+    stop_at = int(argv[4])
 except IndexError:
     pass
 
 delay = None
 
 try:
-    delay = int(argv[4])
+    delay = int(argv[5])
 except IndexError:
     pass
 
+
 try:
-    if insert:
+    if insert or not skip_keys:
         raise FileNotFoundError
     with open("scripts/lost_keys.dat", "r") as f:
         lost_keys = set([k.strip() for k in f.readlines()])
